@@ -1,0 +1,7 @@
+import { describe,expect,it } from "bun:test";
+import { catalogCompanyId,catalogCsvRows,normalizeCatalogRows } from "./catalogueContract";
+describe("published prospect import contract",()=>{
+  it("retains multiline business data and never invents verification or missing contacts",()=>{const rows=normalizeCatalogRows(catalogCsvRows('会社名,ドメイン,事業内容,氏名,メールアドレス,独自列\n架空社,sample.example,"行1\n行2",担当者,a@sample.example,記録'));expect(rows[0].description).toBe("行1\n行2");expect(rows[0].verification).toBe("unknown");expect(rows[0].extra.独自列).toBe("記録");expect(normalizeCatalogRows([{"会社名":"企業だけ"}])[0].email).toBe("");});
+  it("deduplicates contacts but keeps different decision makers at one company",()=>{const rows=normalizeCatalogRows([{company:"A",domain:"a.example",name:"One",email:"one@a.example"},{company:"A",domain:"a.example",name:"One",email:"ONE@a.example"},{company:"A",domain:"a.example",name:"Two",email:"two@a.example"}]);expect(rows).toHaveLength(2);expect(catalogCompanyId(rows[0].domain,"A")).toBe(catalogCompanyId(rows[1].domain,"A"));});
+  it("rejects broken mail and duplicate headings, sanitizes URLs and accepts company-only imports",()=>{expect(()=>normalizeCatalogRows([{company:"A",email:"not-email"}])).toThrow();expect(()=>catalogCsvRows('会社名,会社名\nA,B')).toThrow();expect(normalizeCatalogRows([{company:"A",website:"javascript:alert(1)",verification:"valid"}])[0].domain).toBe("");expect(()=>normalizeCatalogRows([])).toThrow();});
+});

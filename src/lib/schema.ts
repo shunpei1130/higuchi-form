@@ -2,6 +2,7 @@ import { pgTable, text, numeric, bigint, boolean } from "drizzle-orm/pg-core";
 export * from "./higuchi/schema";
 export * from "./higuchi/jobs/schema";
 export * from "./higuchi/bookingSchema";
+export * from "./higuchi/preview/schema";
 
 // Brand qualification pipeline tables (campaigns, targeted_domains, qualification_jobs).
 export * from "./qualification/schema";
@@ -36,6 +37,8 @@ export * from "./publicApi/schema";
 // Better Auth: users, sessions, accounts, verifications, organizations,
 // members, invitations, teams, team_members.
 export * from "./auth/schema";
+export * from "./higuchi/catalogueSchema";
+export * from "./higuchi/guaranteeSchema";
 
 // The lead database (people, companies, entity_columns, import_runs).
 //

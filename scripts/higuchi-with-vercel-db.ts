@@ -6,7 +6,7 @@
  * permits fixed provisioning scripts and one guarded AI smoke; it never runs booking tests.
  */
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,11 +27,17 @@ const target = production ? "production" : "preview";
 const explicitMode = production || input[0] === "preview";
 const operation = input[explicitMode ? 1 : 0] ?? "inspect";
 const commands: Record<string, string[]> = production ? {
+  "preview-schema": ["scripts/db/higuchi-preview.ts"],
+  "catalog-schema": ["scripts/db/higuchi-catalog-guarantee.ts"],
   setup: ["scripts/db/setup.ts", "--if-empty"],
   upgrade: ["scripts/db/higuchi-setup.ts"],
   bootstrap: ["scripts/db/higuchi-bootstrap-operator.ts", "--apply", "--confirm-operator=s.hasegawa1130@gmail.com"],
   "ai-test": ["--conditions=react-server", "scripts/higuchi-ai-smoke.ts"],
 } : {
+  "preview-schema": ["scripts/db/higuchi-preview.ts"],
+  "catalog-schema": ["scripts/db/higuchi-catalog-guarantee.ts"],
+  "preview-test": ["test", "--conditions=react-server", "src/lib/higuchi/preview/store.integration.test.ts"],
+  "fixture-server": ["node_modules/next/dist/bin/next", "dev", "--webpack", "--hostname", "127.0.0.1", "--port", "3107"],
   setup: ["scripts/db/setup.ts"],
   upgrade: ["scripts/db/higuchi-setup.ts"],
   "booking-test": ["test", "--conditions=react-server", "src/lib/higuchi/booking/service.integration.test.ts"],
@@ -78,7 +84,9 @@ function main() {
   if (!existsSync(bun)) return fail("既存のBun実行環境が見つかりません。");
   const args = commands[operation];
   if (!args) return fail("固定された実行コマンドを確認できませんでした。");
-  const child = spawnSync(bun, args, { cwd: root, encoding: "utf8", windowsHide: true, timeout: 240_000, maxBuffer: 5_000_000, env: { ...process.env, DATABASE_URL: connection, DATABASE_URL_UNPOOLED: connection, DATABASE_SSL: "require", DB_POOL_MAX: "2", NEON_PROJECT_ID: neonProject, VERCEL_ENV: target, HIGUCHI_MODE: "live", HIGUCHI_AI_SMOKE_ALLOW: production && operation === "ai-test" ? "production-one-call" : "", HIGUCHI_BOOKING_TEST_DATABASE_URL: operation === "booking-test" ? connection : "", HIGUCHI_JOBS_TEST_DATABASE_URL: operation === "jobs-test" ? connection : "", RESEND_API_KEY: "", OPENAI_API_KEY: "", GOOGLE_CLIENT_SECRET: "" } });
+  const fixture = operation === "fixture-server";
+  if(fixture) console.log(JSON.stringify({target,operation,starting:true,url:"http://127.0.0.1:3107",externalProviders:false}));
+  const child = spawnSync(fixture?process.execPath:bun, args, { cwd: root, encoding: "utf8", windowsHide: true, timeout: fixture?2_700_000:240_000, maxBuffer: 5_000_000, ...(fixture?{stdio:"ignore" as const}:{}), env: { ...process.env, DATABASE_URL: connection, DATABASE_URL_UNPOOLED: connection, DATABASE_SSL: "require", DB_POOL_MAX: "2", NEON_PROJECT_ID: neonProject, VERCEL_ENV: target, HIGUCHI_MODE: "live", HIGUCHI_AI_SMOKE_ALLOW: production && operation === "ai-test" ? "production-one-call" : "", HIGUCHI_BOOKING_TEST_DATABASE_URL: operation === "booking-test" ? connection : "", HIGUCHI_JOBS_TEST_DATABASE_URL: operation === "jobs-test" ? connection : "", HIGUCHI_PREVIEW_TEST_DATABASE_URL: operation === "preview-test" ? connection : "", ...(fixture?{HIGUCHI_PREVIEW_FIXTURE:"true",BETTER_AUTH_URL:"http://127.0.0.1:3107",NEXT_PUBLIC_APP_URL:"http://127.0.0.1:3107",BETTER_AUTH_SECRET:randomBytes(32).toString("hex"),HIGUCHI_SESSION_SECRET:randomBytes(32).toString("hex"),INTEGRATION_CREDENTIALS_KEY:randomBytes(32).toString("base64"),CRON_SECRET:randomBytes(32).toString("hex"),HIGUCHI_SEND_ENABLED:"false",HIGUCHI_AI_MONTHLY_BUDGET_USD:"0",INTERNAL_SCHEDULER:"false",AUTH_SIGNUP:"invite-only",NEXT_TELEMETRY_DISABLED:"1",STRIPE_SECRET_KEY:"",STRIPE_WEBHOOK_SECRET:"",GOOGLE_CLIENT_ID:""}:{}), RESEND_API_KEY: "", OPENAI_API_KEY: "", GOOGLE_CLIENT_SECRET: "" } });
   const passed = !child.error && child.status === 0;
   const summary = `${child.stdout ?? ""}\n${child.stderr ?? ""}`.split(/\r?\n/).map(line => line.trim()).filter(line => /^\d+ (?:pass|fail|skip)$/.test(line) || /^Ran \d+ tests across \d+ files?\./.test(line));
   let aiResult: unknown;

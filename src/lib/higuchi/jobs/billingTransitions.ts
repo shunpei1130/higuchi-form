@@ -1,8 +1,10 @@
 import { id, recordActivity, type BillingJob, type WorkspaceState } from "../state";
+import { billingPolicy } from "../money";
 
 export function claimBillingEntry(state:WorkspaceState,entryId:string):BillingJob|null {
   const entry=state.internal.billingJobs.find(job=>job.id===entryId),now=Date.parse(state.now);
   if(!entry||["complete","failed"].includes(entry.status)||entry.status==="running"&&now-Date.parse(entry.lockedAt??state.now)<180000||entry.retryAt&&Date.parse(entry.retryAt)>now)return null;
+  entry.currency??=state.billing.currency;entry.priceVersion??=state.billing.priceVersion;
   entry.status="running";entry.lockedAt=state.now;
   // Persist before any provider write. Never reset on timeout, lease recovery, or a later queue attempt.
   entry.firstAttemptAt??=state.now;entry.attempts=(entry.attempts??0)+1;
@@ -21,11 +23,11 @@ export function completeBillingEntry(state:WorkspaceState,claim:BillingJob,subsc
     if(state.ledger.some(entry=>entry.kind==="trial"||entry.kind==="topup")){state.billing.billingConfigured=true;state.billing.paymentStatus="verified";}
   }
   if(claim.kind==="trial"||claim.kind==="topup"){
-    const amount=claim.kind==="trial"?3000:claim.creditCents;
+    const amount=claim.kind==="trial"?billingPolicy(claim.currency??state.billing.currency).trialMinor:claim.creditCents;
     if(!Number.isSafeInteger(amount)||!amount||amount<0)throw new Error("利用クレジットの金額が正しくありません。");
     if(!state.ledger.some(entry=>entry.dedupeKey===claim.id)){
       state.billing.balanceCents+=amount;state.billing.pendingCreditCents=Math.max(0,state.billing.pendingCreditCents-amount);
-      state.ledger.unshift({id:id("entry"),projectId:null,campaignId:null,at:state.now,kind:claim.kind,amountCents:amount,description:claim.kind==="trial"?"初回無料クレジット":"支払確認済みクレジット",dedupeKey:claim.id});
+      state.ledger.unshift({id:id("entry"),projectId:null,campaignId:null,at:state.now,kind:claim.kind,currency:claim.currency??state.billing.currency,priceVersion:claim.priceVersion??state.billing.priceVersion,amountCents:amount,description:claim.kind==="trial"?"初回無料クレジット":"支払確認済みクレジット",dedupeKey:claim.id});
     }
     if(available()&&state.billing.postpaidEnabled){state.billing.billingConfigured=true;state.billing.paymentStatus="verified";}
     if(claim.kind==="topup")state.billing.topupStatus="completed";

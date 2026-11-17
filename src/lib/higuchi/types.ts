@@ -1,4 +1,5 @@
-/** Shared, client-safe contract for the Japanese product and its server. Money is integer USD cents. */
+import type { MoneyCurrency } from "./money";
+/** Client contract. Deprecated *Cents names contain integer minor units for billing.currency. */
 export type ProductMode = "simulation" | "live";
 export type CampaignStatus = "draft" | "review" | "running" | "paused" | "archived";
 export type LeadStatus = "ready" | "contacted" | "replied" | "interested" | "booked" | "suppressed";
@@ -8,7 +9,7 @@ export type Project = {
   id: string; name: string; website: string; description: string; icp: string;
   createdAt: string; status: "ready" | "analyzing" | "needs_setup"; analysisSources: string[];
   dailyBudgetCents: number; monthlyBudgetCents: number; autopilot: boolean;
-  geography: string; segments: ProjectSegment[];
+  geography: string; segments: ProjectSegment[]; previewRunId?: string;
 };
 export type Campaign = {
   id: string; projectId: string; name: string; audience: string; objective: string;
@@ -21,7 +22,8 @@ export type Campaign = {
 };
 export type Lead = {
   id: string; projectId: string; campaignId: string | null; name: string; email: string;
-  company: string; role: string; website: string; status: LeadStatus; source: "csv" | "simulation";
+  company: string; role: string; website: string; status: LeadStatus; source: "csv" | "simulation" | "dataset";
+  preparedEmail?: {subject:string;body:string;revision:number};
   lastContactAt: string | null; nextFollowUpAt: string | null; followUpStep: number;
 };
 export type InboxMessage = { id: string; direction: "inbound" | "outbound"; body: string; sentAt: string; automatic: boolean; status: "sent" | "received" | "simulated" };
@@ -36,7 +38,7 @@ export type Meeting = { id: string; projectId: string; campaignId: string; leadI
 export type LedgerEntry = {
   id: string; projectId: string | null; campaignId: string | null; at: string;
   kind: "trial" | "topup" | "email" | "refund"; amountCents: number;
-  description: string; dedupeKey: string;
+  description: string; dedupeKey: string; currency?: MoneyCurrency; priceVersion?: string;
 };
 export type Activity = { id: string; projectId: string | null; at: string; message: string; kind: "info" | "success" | "warning" };
 export type WorkspaceSettings = {
@@ -44,13 +46,16 @@ export type WorkspaceSettings = {
   bookingUrl: string; autoReply: boolean; emailNotifications: boolean;
 };
 export type BillingState = {
-  currency: "USD"; balanceCents: number; spentCents: number; dailySpentCents: number;
+  currency: MoneyCurrency; priceVersion?: string; balanceCents: number; spentCents: number; dailySpentCents: number;
   emailPriceCents: number; billingConfigured: boolean; customerId: string | null;
   paymentStatus: "unconfigured" | "pending" | "verified" | "failed";
   trialClaimed: boolean; topupStatus: "idle" | "pending" | "completed" | "failed";
   postpaidEnabled: boolean; firstTopupCompleted: boolean; pendingCreditCents: number;
   subscriptionId?:string; lastProviderEventCreatedAt?:number;
   reconciliationRequired?:boolean;
+  firstPrepayment?: { sessionId: string; paymentIntentId?: string; chargeId?: string; amountMinor: number; currency: MoneyCurrency; priceVersion: string; purchasedAt: string };
+  verifiedPreviewSessions?: Record<string,{sessionId:string;mode:"setup"|"payment";amountMinor:number;currency:MoneyCurrency;verifiedAt:string}>;
+  pendingPreviewSessions?: Record<string,{sessionId:string;mode:"setup"|"payment";amountMinor:number;currency:MoneyCurrency;requestId?:string;returnUrl?:string;createdAt?:string;firstPaymentBonus?:boolean;lockId?:string;leaseUntil?:string}>;
 };
 export type ConnectionState = { connected: boolean; status: "ready" | "unconfigured" | "simulation"; detail: string };
 export type IntegrationStates = { ai: ConnectionState; email: ConnectionState; booking: ConnectionState; billing: ConnectionState };

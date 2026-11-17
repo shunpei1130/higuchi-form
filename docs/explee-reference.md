@@ -1,48 +1,43 @@
 # Expleeの調査とhiguchi-formへの対応
 
-## 調査範囲と確度
+## 確認した範囲
 
-2026年11月16日に、[Expleeの公開ページ](https://explee.com/)、ログイン前の入力画面、PC表示、[公開API仕様](https://api.explee.com/public/api/docs)と[OpenAPI](https://api.explee.com/public/api/openapi.json)を確認した。
+2026年11月16〜17日に[Expleeの公開ページ](https://explee.com/)、ログイン前のURL入力からメール確認・プラン選択まで、PCとスマートフォンの表示を確認した。[公開API仕様](https://api.explee.com/public/api/docs)と[OpenAPI](https://api.explee.com/public/api/openapi.json)は、キャンペーン、受信箱、予算などの業務仕様を確認するために参照した。
 
-公開ページの配置・配色・入力方法は画面で確認した情報、キャンペーン・受信箱・予算などの動作は公開仕様を根拠としている。ログイン後の管理画面の外見、非公開コード、内部モデル、データ取得の実装、運用上の成果は確認していない。higuchi-formは、確認できた利用者向けの動作を別のコードで実装したもので、Expleeの内部実装の複製ではない。
+URL入力後は、会社調査、競合調査、キャンペーン設計、企業候補、意思決定者、個別メールの6工程が進む。会社・競合・キャンペーンの左欄、企業・担当者・メールの切り替え、メールの編集、最終の前払い／従量払い選択は公開画面で観察した。非公開のコード、モデル、顧客データ、ログイン後の管理画面、実際の獲得成果は確認していない。
 
-基盤は[Kandid-ai/AgentSDR](https://github.com/Kandid-ai/AgentSDR/tree/263888cbfb127787b002b6be0c432e85765ead90)の固定コミット`263888cbfb127787b002b6be0c432e85765ead90`。上流のMIT著作権・許諾表示は[LICENSE](../LICENSE)に保持している。
+基盤は[Kandid-ai/AgentSDR](https://github.com/Kandid-ai/AgentSDR/tree/263888cbfb127787b002b6be0c432e85765ead90)の固定コミット`263888cbfb127787b002b6be0c432e85765ead90`。上流のMIT著作権・許諾表示は[LICENSE](../LICENSE)に保持している。以下はhiguchi-formが採用した実装であり、Expleeの内部構成を推定したものではない。
 
-## 公開仕様から分かる営業の流れ
+## 現在の実装
 
-Expleeは、会社URL、または事業・理想顧客・対象地域の入力を起点に、顧客像の整理、キャンペーン、個別メール、返信対応、予約リンクの案内までをまとめて提供している。キャンペーンのレビュー、開始・停止、予算、自動返信、受信箱の操作は公開APIに記載されている。[公式ページ](https://explee.com/)、[API仕様](https://api.explee.com/public/api/docs)
-
-営業メールの従量料金、カード確認後の無料枠、運営側が用意する送信元も公開ページで説明されている。一方、独自の企業データと送信基盤は公開された業務仕様とは別の資産であり、AgentSDRに同梱されているわけではない。到達率や獲得実績はExpleeの説明であって、higuchi-formの成果を示すものではない。[公式ページ](https://explee.com/)
-
-## 現在の実装への対応
-
-| 工程 | higuchi-formの処理 | 主な実装 |
+| 工程 | higuchi-formの処理 | 主なモジュール |
 | --- | --- | --- |
-| 事業入力・解析 | プロジェクトを作成。実接続時は公開サイトと入力文を基に、事業・顧客像・地域・最大3つのセグメントを構造化する | `src/lib/higuchi/analysis.ts`、`service.ts` |
-| キャンペーン | セグメントから対象条件と初回文面を用意し、レビュー・承認・稼働・停止・アーカイブを管理する | `engine.ts`、`types.ts` |
-| 顧客リスト | CSVを検査し、重複・配信停止を確認してプロジェクトとキャンペーンに関連付ける | `csv.ts`、`engine.ts` |
-| 個別メールの準備 | 事業、対象条件、顧客、保存文面、会話を基に下書きを作成。生成後に条件が変わっていないか再確認する | `delivery.ts`、`analysis.ts` |
-| 送信・利用確定 | 予算を確保し、専用メールボックスの送信条件を確認。プロバイダの受付記録が得られた時点で送信と利用量を確定する | `engine.ts`、`providerMailboxes.ts`、`delivery.ts` |
-| 返信・追客 | 受信を会話に取り込み、返信時に未送信の追客を取り消す。配信停止や要確認を判定し、許可された返信案だけを予約する | `service.ts`、`analysis.ts` |
-| 商談予約 | 予約リンクを案内し、既存Cal.com連携で記録された予約・取消を反映する。代理で空き枠を選んで予約を確定する機能は持たない | `service.ts`、上流の`src/lib/crm/meetings.ts` |
-| 利用量・決済 | Stripeで支払方法と前払いを扱い、Metronomeへ無料枠・前払残高・利用イベントを反映。通知を検証して状態を更新する | `providerBilling.ts`、`billingState.ts` |
+| 公開入力・会社調査 | URLまたは事業・顧客像・地域から匿名調査を保存。公開ページを読み、OpenAI `gpt-6-luna`で事業を整理する | `preview/store.ts`、`preview/research.ts`、`preview/ai.ts` |
+| 競合調査 | 合計3回までのWeb検索から、出典を確認できた最大15社を表示する | `preview/research.ts`、`preview/budget.ts` |
+| キャンペーン | 異なる顧客像の企画を3〜6つ作成。短い日英検索語、地域、役職、会社規模を保存。検索語と人数範囲を個別に編集する | `preview/types.ts`、`preview/rules.ts` |
+| 顧客候補 | 運営者が公開したDB出力・CSV・Excelから条件で絞り込み、提供元の検証状態を表示する | `prospectCatalog.ts`、`prospectFilters.ts`、`catalogueContract.ts` |
+| 個別メール | 全キャンペーンに配分した最大9通を作成。宛先・件名・本文を版付きで編集し、途中の入力を進捗更新で上書きしない | `preview/research.ts`、`src/components/preview/` |
+| 本人確認・取り込み | 画面内OTP後、同じ匿名結果を組織へ一度だけ保存。取り込み時点では送信予約や自動開始を作らない | `previewClaim.ts`、`previewClaimContract.ts` |
+| 決済・開始 | 円建てStripe Payment Element、明示した開始承認、当該セッションの署名付き通知、保存文面を照合して開始する | `providerBilling.ts`、`billingState.ts`、`src/components/higuchi/EmbeddedCheckout.tsx` |
+| 送信・利用確定 | 予算と送信条件を確認し、Googleの受付記録後に送信・利用量を確定。結果不明は照合し、無条件に再送しない | `delivery.ts`、`providerMailboxes.ts`、`jobs/handlers.ts` |
+| 返信・商談 | 受信に応じて追客を取り消し、配信停止・要確認を優先。顧客別の内蔵予約ページで予約・変更・取消を管理する | `analysis.ts`、`jobs/inboxRules.ts`、`booking/` |
+| 利用量・返金保証 | Stripe Meters・Credit Grants・Subscriptionsとアプリ台帳を照合し、保証申請を運営者が審査する | `providerBilling.ts`、`money.ts`、`guaranteePolicy.ts` |
 
-表の相対ファイル名は、断りのない限り`src/lib/higuchi/`内を指す。画面は`src/app/app/`、共有UIは`src/components/higuchi/`。画面向けAPIは`/api/higuchi/workspace`と`/api/higuchi/actions`、プロジェクト・キャンペーンのREST入口も用意している。ExpleeのHTTP APIとの完全互換を保証するものではない。
+モジュール名は断りのない限り`src/lib/higuchi/`内を指す。公開画面は`/auto-gtm/.../explore`と`/api/previews`、管理画面は`/app`、画面向けAPIは`/api/higuchi/workspace`と`/api/higuchi/actions`である。Explee APIとの完全互換は目的としていない。
 
-AgentSDRからは認証・組織権限、暗号化された接続設定、Google Workspaceの送受信、人物・送信履歴、CRMの予約処理を利用する。その上に、プロジェクト単位の営業フローと予算・課金の制御を追加した。公開ページを持たない上流のルート構成は、そのままではExplee型の導入画面にならないため、公開トップと専用の`/app`を新設している。[上流のトップページ](https://github.com/Kandid-ai/AgentSDR/blob/263888cbfb127787b002b6be0c432e85765ead90/src/app/page.tsx)
+## 運用上の判断
 
-## 再現のために採用した実装上の判断
+- UIと文面の既定は日本語。新しい利用は円建てで1通6円、返信は無料。無料枠4,500円と初回前払い2倍は併用しない。既存USD顧客・契約は自動換算せず保持する。
+- OpenAIは直接接続し、匿名調査を含むアプリ全体でUTC月額20米ドルまで予約・精算する。AIには送信・課金・設定変更の権限を渡さない。
+- 営業送信元はGoogle OAuthで接続した`shumpei.hasegawa@maora.co.jp`。現在の運用上限は対象組織ごとに1日30通、日本時間の平日10〜18時。通知・認証メールはResendで扱う。
+- 予約は内蔵機能を使用する。既定は日本時間の平日10〜18時、30分、15分刻み、終了後15分の余白、24時間前から30日先まで。外部カレンダー同期や会議URLの自動生成はしない。
+- 決済・従量課金はStripeへ直接接続する。MetronomeやOpenRouter、Cal.comは今回の営業フローの実接続先に使わない。
+- 匿名の会社情報・候補・文面は保存期限を24時間とし、期限後の定期処理で消去する。費用台帳と、本人確認後に組織へ取り込んだデータは保持する。公開停止用の`HIGUCHI_PUBLIC_PREVIEW=false`では、LPを従来のログイン後の事業設定へ戻す。
 
-- 名称はhiguchi-form、UIと生成文の既定は日本語。表示日時は日本時間、予算集計はUTC、金額はUSDの整数セントとする。
-- レビューは12時間の猶予と明示承認を持つ。停止中は初回・追客・自動返信を送らず、受信を続ける。アーカイブでは保留送信を取り消し、復元後も自動返信をオフにする。公開仕様の操作上の違いを基準にした。[OpenAPI](https://api.explee.com/public/api/openapi.json)
-- 本番の個別文面作成は、組織ごとに設定したOpenRouterのモデルを利用する。モデルには送信や設定変更の操作権限を与えず、検査する下書きだけを返させる。
-- 実績を使う予算再配分、送信前の予算予約、送信結果不明時の照合、MetronomeとStripeの役割分担は今回の実装方式である。Expleeが内部で同じ方式を採用していると判断したものではない。
-- 本番状態は組織別のPostgreSQL行に保存し、更新をトランザクションで直列化する。ローカルシミュレーションは署名付きCookieごとのファイルを使い、外部へのAI呼出し・メール・予約・決済は行わない。
+## データと確認の限界
 
-## 保留事項と確認の限界
+顧客データは利用者が後から用意する。運営者が公開したライブラリだけを匿名検索し、非公開データや各組織の私有顧客リストを検索対象にしない。外部顧客データサービスやExplee APIの契約は追加しない。
 
-顧客データの調達先は保留しており、現在の実データ入口はCSVである。外部DBを検索できるように見せる架空の本番応答は返さない。シミュレーションの企業・人物・成果は、画面で検証用と明示する。
+データが未公開なら候補とメールをサンプルと明記し、取り込み・カード登録・決済・送信を禁止する。公開済みデータに該当候補がなければ0件を表示する。会社・競合も固定データにする画面検証用の機能は、専用のテスト環境だけで使える。
 
-送信用ドメイン、ウォームアップ、事業者アカウント、接続キー、正式な販売条件は別途運営側の準備が必要。外部サービスへの実送信・実課金の成否は、ローカルの模擬動作や自動テストだけでは確認できない。[接続手順](higuchi-integrations.md)と検証記録を参照する。
-
-Expleeの顧客写真・推薦文・成果値はhiguchi-formの実績として使っていない。参照ページ由来のマークとフォントの扱いは[素材の出典](../public/reference-assets.md)に記録し、公開利用前の権利確認を分けている。
+Expleeの顧客写真・推薦文・成果値はhiguchi-formの実績として使っていない。素材は[出典](../public/reference-assets.md)、接続と設定は[運用手順](higuchi-integrations.md)、実接続の確認範囲は[本番状況](higuchi-production-status.md)を参照されたい。模擬試験や接続表示の成功だけでは、実送信・実課金・通知配送の一連の動作を確認済みとは扱わない。

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { higuchiAiUsage } from "./jobs/schema";
+import { higuchiPreviewAiUsage } from "./preview/schema";
 import { ProductError } from "./state";
 
 const MODEL = "gpt-6-luna";
@@ -22,7 +23,8 @@ export function openAiConfigured():boolean { return Boolean(process.env.OPENAI_A
 export async function getAiBudget(){
   const month=new Date().toISOString().slice(0,7);
   const [row]=await db.select({used:sql<number>`coalesce(sum(coalesce(${higuchiAiUsage.actualMicros},${higuchiAiUsage.reservedMicros})),0)::int`}).from(higuchiAiUsage).where(eq(higuchiAiUsage.month,month));
-  return {month,usedMicros:Number(row?.used??0),limitMicros:Math.min(20,Number(process.env.HIGUCHI_AI_MONTHLY_USD??20))*MICROS_PER_USD};
+  const [previews]=await db.select({used:sql<number>`coalesce(sum(coalesce(${higuchiPreviewAiUsage.actualMicros},${higuchiPreviewAiUsage.reservedMicros})),0)::int`}).from(higuchiPreviewAiUsage).where(eq(higuchiPreviewAiUsage.month,month));
+  return {month,usedMicros:Number(row?.used??0)+Number(previews?.used??0),limitMicros:Math.min(20,Number(process.env.HIGUCHI_AI_MONTHLY_USD??20))*MICROS_PER_USD};
 }
 export async function completeWithOpenAi(input:{organizationId:string;systemPrompt:string;userPrompt:string;jsonSchema:Record<string,unknown>;schemaName:string;maxOutputTokens:number}):Promise<{text:string}> {
   if(!openAiConfigured())throw new ProductError("OpenAIの接続が未設定です。",409,"AI_UNCONFIGURED");
@@ -36,7 +38,8 @@ export async function completeWithOpenAi(input:{organizationId:string;systemProm
   const usageId=await db.transaction(async tx=>{
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`higuchi-ai:${month}`},0))`);
     const [row]=await tx.select({used:sql<number>`coalesce(sum(coalesce(${higuchiAiUsage.actualMicros},${higuchiAiUsage.reservedMicros})),0)::int`}).from(higuchiAiUsage).where(eq(higuchiAiUsage.month,month));
-    if(Number(row?.used??0)+reserved>limit)throw new ProductError("今月のAI利用上限20米ドルに達しました。",409,"AI_BUDGET_EXCEEDED");
+    const [previews]=await tx.select({used:sql<number>`coalesce(sum(coalesce(${higuchiPreviewAiUsage.actualMicros},${higuchiPreviewAiUsage.reservedMicros})),0)::int`}).from(higuchiPreviewAiUsage).where(eq(higuchiPreviewAiUsage.month,month));
+    if(Number(row?.used??0)+Number(previews?.used??0)+reserved>limit)throw new ProductError("今月のAI利用上限20米ドルに達しました。",409,"AI_BUDGET_EXCEEDED");
     const [saved]=await tx.insert(higuchiAiUsage).values({organizationId:input.organizationId,requestKey,month,model,reservedMicros:reserved}).returning({id:higuchiAiUsage.id});return saved.id;
   });
   try{

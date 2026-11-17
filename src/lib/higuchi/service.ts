@@ -6,6 +6,7 @@ import type { WorkspaceAction, WorkspaceSnapshot } from "./types";
 import type { VerifiedBillingEvent } from "./providerBilling";
 import { applyBillingEvent } from "./billingState";
 import { readJsonObject, validateAction } from "./validation";
+import { billingPolicy } from "./money";
 
 export function assertSameOrigin(request: Request): void {
   const origin = request.headers.get("origin");
@@ -65,12 +66,13 @@ export async function dispatchWorkspace(request: Request, action: WorkspaceActio
       if (!statuses.billing.connected) throw new ProductError("運営側の決済接続が未設定です。",409,"BILLING_UNCONFIGURED");
       const billing = await import("./providerBilling"); let redirectUrl: string;
       if(typeof action.requestId!=="string"||!action.requestId.trim()||action.requestId.length>200)throw new ProductError("リクエストIDを指定してください。");
-      if (action.type === "billing.setup") redirectUrl = (await billing.createBillingSetup({organizationId:ctx.organizationId,returnUrl,requestId:action.requestId,email:ctx.userEmail})).url;
+      const currentBilling=(await mutateLive(state=>structuredClone(state.billing))).result;
+      if(action.type!=="billing.portal"&&currentBilling.reconciliationRequired)throw new ProductError("返金・残高の照合が完了するまで、新しいカード登録・前払いを停止しています。運営者にご連絡ください。",409,"BILLING_RECONCILIATION_REQUIRED");
+      if (action.type === "billing.setup") redirectUrl = (await billing.createBillingSetup({organizationId:ctx.organizationId,currency:currentBilling.currency,returnUrl,requestId:action.requestId,email:ctx.userEmail})).url;
       else if (action.type === "billing.checkout") {
-        if (!Number.isSafeInteger(action.amountCents) || ![3000,5000,10000].includes(action.amountCents)) throw new ProductError("入金額は$30・$50・$100から選択してください。");
-        const current=await mutateLive(state=>!state.billing.firstTopupCompleted&&!state.billing.trialClaimed);
-        redirectUrl = (await billing.createBillingCheckout({organizationId:ctx.organizationId,amountCents:action.amountCents,returnUrl,requestId:action.requestId,firstPaymentBonus:current.result})).url;
-      } else { const current = await mutateLive((state)=>state.billing.customerId); if (!current.result) throw new ProductError("決済設定を先に完了してください。",409); redirectUrl = (await billing.createBillingPortal({organizationId:ctx.organizationId,customerId:current.result,returnUrl})).url; }
+        if (!Number.isSafeInteger(action.amountCents) || !(billingPolicy(currentBilling.currency).topupMinor as readonly number[]).includes(action.amountCents)) throw new ProductError("指定できない前払い金額です。");
+        redirectUrl = (await billing.createBillingCheckout({organizationId:ctx.organizationId,currency:currentBilling.currency,amountCents:action.amountCents,returnUrl,requestId:action.requestId,firstPaymentBonus:!currentBilling.firstTopupCompleted&&!currentBilling.trialClaimed})).url;
+      } else { if (!currentBilling.customerId) throw new ProductError("決済設定を先に完了してください。",409); redirectUrl = (await billing.createBillingPortal({organizationId:ctx.organizationId,currency:currentBilling.currency,customerId:currentBilling.customerId,returnUrl})).url; }
       const result = await mutateLive((state) => { state.integrations=statuses; state.redirectUrl=redirectUrl; if(action.type !== "billing.portal") {state.billing.paymentStatus="pending";state.billing.topupStatus="pending";} });
       return { workspace:snapshot(result.state),cookie:null };
     }
@@ -94,7 +96,7 @@ export async function dispatchWorkspace(request: Request, action: WorkspaceActio
 export async function applyVerifiedBillingEvent(event:VerifiedBillingEvent):Promise<void> {
   if(isHiguchiSimulation())throw new ProductError("検証環境では決済通知を受け付けません。",409);
   const [{runInOrganization},{scheduleWorkspaceJobs},{enqueueOwnerNotice}]=await Promise.all([import("@/lib/tenancy/scope"),import("./jobs/handlers"),import("./jobs/ownerNotifications")]);
-  await runInOrganization(event.organizationId,()=>mutateLive(async(state,tx)=>{applyBillingEvent(state,event);if(event.kind==="payment_failed"||event.kind==="refund")await enqueueOwnerNotice(tx,{organizationId:event.organizationId,enabled:state.settings.emailNotifications,kind:"billing",requestId:event.eventId});await scheduleWorkspaceJobs(state,event.organizationId,tx);}));
+  await runInOrganization(event.organizationId,()=>mutateLive(async(state,tx)=>{applyBillingEvent(state,event);if(event.kind==="refund"){const {syncGuaranteeRefund}=await import("./guarantee");await syncGuaranteeRefund(tx,event);}if(event.kind==="payment_failed"||event.kind==="refund")await enqueueOwnerNotice(tx,{organizationId:event.organizationId,enabled:state.settings.emailNotifications,kind:"billing",requestId:event.eventId});await scheduleWorkspaceJobs(state,event.organizationId,tx);}));
 }
 export async function runHiguchiTick():Promise<void>{await (await import("./jobs/worker")).runHiguchiJobs();}
 /** Platform cron is the sole production scheduler. */

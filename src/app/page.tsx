@@ -7,4 +7,5 @@ export const metadata: Metadata = {
   robots: { index: true, follow: true },
 };
 
-export default function Home() { return <Landing />; }
+export const dynamic="force-dynamic";
+export default function Home() { return <Landing previewEnabled={process.env.HIGUCHI_PUBLIC_PREVIEW!=="false"}/>; }

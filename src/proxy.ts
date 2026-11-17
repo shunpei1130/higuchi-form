@@ -3,14 +3,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { migrationMutationBlockReason } from "@/lib/migration/controls";
 import { DEMO_READ_ONLY_CODE, DEMO_READ_ONLY_MESSAGE, demoRequestBlock, isDemoMode } from "@/lib/demo/mode";
 import { isHiguchiSimulation, isLoopbackHost } from "@/lib/higuchi/mode";
-import { isHiguchiPublicPath } from "@/lib/higuchi/boundary";
+import { isHiguchiPublicPath, isPublicPreviewPath } from "@/lib/higuchi/boundary";
 import { bootstrapEnabledForWeb } from "@/lib/auth/operatorBootstrapPolicy";
 
 export function proxy(request:NextRequest){
   const {pathname}=request.nextUrl;
   // Only a CLI transaction may grant the initial platform-operator role.
   if(!bootstrapEnabledForWeb({nodeEnv:process.env.NODE_ENV,vercel:process.env.VERCEL})&&(pathname==="/setup"||pathname==="/api/setup"||pathname.startsWith("/setup/")||pathname.startsWith("/api/setup/")))return NextResponse.json({error:"この環境の初期設定は運営者が行います。"},{status:404});
-  const productPath=pathname==="/app"||pathname==="/operator"||pathname.startsWith("/app/")||pathname.startsWith("/api/higuchi/")||pathname==="/api/projects"||pathname.startsWith("/api/projects/");
+  const productPath=pathname==="/app"||pathname==="/operator"||pathname.startsWith("/operator/")||pathname.startsWith("/app/")||pathname.startsWith("/api/higuchi/")||pathname==="/api/projects"||pathname.startsWith("/api/projects/")||isPublicPreviewPath(pathname);
   if(isHiguchiSimulation()&&pathname.startsWith("/api/")&&!productPath&&!pathname.startsWith("/api/auth/"))return NextResponse.json({error:"この操作は本番接続モードで利用できます。",code:"SIMULATION_ENDPOINT_DISABLED"},{status:409});
   if(isHiguchiSimulation()&&productPath){
     if(!isLoopbackHost(request.nextUrl.hostname))return NextResponse.json({error:"検証環境はこのコンピューター上でのみ利用できます。"},{status:403});

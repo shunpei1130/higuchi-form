@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import type { WorkspaceAction, WorkspaceSnapshot } from "@/lib/higuchi/types";
+import { workspacePollDelay } from "./liveUpdates";
 
 type WorkspaceContextValue = {
   data: WorkspaceSnapshot | null; loading: boolean; busy: boolean; error: string | null; notice: string | null;
@@ -19,7 +20,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const mounted = useRef(true);
+  const requestSequence = useRef(0);
+  const lastAccepted = useRef(0);
+  const mutations = useRef(0);
   const request = useCallback(async (action?: WorkspaceAction, signal?: AbortSignal) => {
+    const sequence = ++requestSequence.current;
     const response = await fetch(action ? "/api/higuchi/actions" : "/api/higuchi/workspace", { method: action ? "POST" : "GET", credentials: "same-origin", cache: "no-store", headers: action ? { "Content-Type": "application/json" } : undefined, body: action ? JSON.stringify(action) : undefined, signal });
     const value = await response.json();
     if (!response.ok) {
@@ -29,8 +34,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       throw new Error(value.error || "処理を完了できませんでした。もう一度お試しください。");
     }
     const snapshot = value as WorkspaceSnapshot;
-    if (mounted.current) { setData(snapshot); if (snapshot.notice) setNotice(snapshot.notice); }
-    if (snapshot.redirectUrl) window.location.assign(snapshot.redirectUrl);
+    if (mounted.current && sequence >= lastAccepted.current) { lastAccepted.current = sequence; setData(snapshot); if (snapshot.notice) setNotice(snapshot.notice); }
+    if (action && snapshot.redirectUrl) window.location.assign(snapshot.redirectUrl);
     return snapshot;
   }, [router]);
   useEffect(() => {
@@ -39,10 +44,22 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     request(undefined, controller.signal).catch((cause: unknown) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "ワークスペースを読み込めませんでした。"); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { mounted.current = false; controller.abort(); };
   }, [request]);
+  useEffect(() => {
+    if (!data || loading) return;
+    const delay = workspacePollDelay(data, document.hidden);
+    if (delay === null) return;
+    const controller = new AbortController();
+    let inFlight = false;
+    const update = () => { if (!mutations.current && !inFlight) { inFlight = true; void request(undefined, controller.signal).catch(() => { /* Keep the last successful snapshot; manual refresh reports failures. */ }).finally(() => { inFlight = false; }); } };
+    const timer = setInterval(update, delay);
+    const onVisible = () => { if (!document.hidden) update(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(timer); controller.abort(); document.removeEventListener("visibilitychange", onVisible); };
+  }, [data, loading, request, pending]);
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(null), 6500); return () => clearTimeout(timer); }, [notice]);
   const perform = useCallback(async (action: WorkspaceAction) => {
-    setPending((value) => value + 1); setError(null);
-    try { return await request(action); } catch (cause) { setError(cause instanceof Error ? cause.message : "処理を完了できませんでした。"); return null; } finally { if (mounted.current) setPending((value) => Math.max(0, value - 1)); }
+    mutations.current++; setPending((value) => value + 1); setError(null);
+    try { return await request(action); } catch (cause) { setError(cause instanceof Error ? cause.message : "処理を完了できませんでした。"); return null; } finally { mutations.current--; if (mounted.current) setPending((value) => Math.max(0, value - 1)); }
   }, [request]);
   const refresh = useCallback(async () => { setError(null); try { await request(); } catch (cause) { setError(cause instanceof Error ? cause.message : "再読み込みできませんでした。"); } }, [request]);
   const value = useMemo(() => ({ data, loading, busy: pending > 0, error, notice, perform, refresh, dismissNotice: () => setNotice(null), dismissError: () => setError(null) }), [data, loading, pending, error, notice, perform, refresh]);

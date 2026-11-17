@@ -2,6 +2,7 @@ import type { Campaign, Conversation, Lead, WorkspaceAction } from "./types";
 import { defaultTargeting, id, ProductError, recordActivity, requireCampaign, requireConversation, requireLead, requireProject, type OutboxItem, type WorkspaceState } from "./state";
 import { parseLeadCsv } from "./csv";
 import { latestActionableMessageId } from "./jobs/inboxRules";
+import { billingPolicy } from "./money";
 
 export const REVIEW_MS = 12 * 60 * 60 * 1000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -40,7 +41,7 @@ export function canReserveEmail(state: WorkspaceState, campaign: Campaign, price
     const posted = -state.ledger.filter((e) => e.kind === "email" && (!projectId || e.projectId === projectId) && (!campaignId || e.campaignId === campaignId) && datePrefix(e.at, length) === datePrefix(state.now, length)).reduce((n, e) => n + e.amountCents, 0);
     return posted + reservations.filter((o) => (!projectId || o.projectId === projectId) && (!campaignId || o.campaignId === campaignId) && datePrefix(o.createdAt, length) === datePrefix(state.now, length)).reduce((n, o) => n + o.reservationCents, 0);
   };
-  const creditFloor = state.billing.postpaidEnabled && state.billing.paymentStatus === "verified" ? -500 : 0;
+  const creditFloor = state.billing.postpaidEnabled && state.billing.paymentStatus === "verified" ? -billingPolicy(state.billing.currency).thresholdMinor : 0;
   return available - price >= creditFloor && spend(project.id, campaign.id, 10) + price <= campaign.dailyBudgetCents && spend(project.id, null, 10) + price <= project.dailyBudgetCents && spend(project.id, null, 7) + price <= project.monthlyBudgetCents;
 }
 function render(template: string, lead: Lead): string {
@@ -55,6 +56,7 @@ export function reserveEmail(state: WorkspaceState, campaign: Campaign, lead: Le
   const price = kind === "reply" ? 0 : state.billing.emailPriceCents;
   if (!state.billing.billingConfigured || !canReserveEmail(state, campaign, price)) return null;
   const outgoing: OutboxItem = { id: requestKey, projectId: campaign.projectId, campaignId: campaign.id, leadId: lead.id, conversationId, subject: render(campaign.emailSubject, lead), body, kind, status: "reserved", createdAt: state.now, reservationCents: price,prepared:state.mode==="simulation"||kind==="reply" };
+  if(kind==="initial"&&lead.preparedEmail){outgoing.subject=lead.preparedEmail.subject;outgoing.body=lead.preparedEmail.body;outgoing.prepared=true;outgoing.generatedAt=state.now;}
   if(existing){Object.assign(existing,outgoing);return existing;}
   state.internal.outbox.push(outgoing);return outgoing;
 }
@@ -64,7 +66,7 @@ export function confirmEmail(state: WorkspaceState, outgoing: OutboxItem, provid
   const campaign = requireCampaign(state, outgoing.campaignId), lead = requireLead(state, outgoing.leadId);
   outgoing.status = "sent"; outgoing.providerMessageId = providerMessageId;
   if (outgoing.reservationCents > 0 && !state.ledger.some((e) => e.dedupeKey === outgoing.id)) {
-    state.ledger.unshift({ id: id("entry"), projectId: outgoing.projectId, campaignId: campaign.id, at: deliveredAt, kind: "email", amountCents: -outgoing.reservationCents, description: `${lead.company || lead.name || lead.email}への${outgoing.kind === "reply" ? "返信" : outgoing.kind === "followup" ? "フォローアップ" : "初回メール"}`, dedupeKey: outgoing.id });
+    state.ledger.unshift({ id: id("entry"), projectId: outgoing.projectId, campaignId: campaign.id, at: deliveredAt, kind: "email", currency:state.billing.currency,priceVersion:state.billing.priceVersion,amountCents: -outgoing.reservationCents, description: `${lead.company || lead.name || lead.email}への${outgoing.kind === "reply" ? "返信" : outgoing.kind === "followup" ? "フォローアップ" : "初回メール"}`, dedupeKey: outgoing.id });
     state.billing.balanceCents -= outgoing.reservationCents;
   }
   campaign.sentCount++;
@@ -141,7 +143,7 @@ export function applyAction(state: WorkspaceState, action: WorkspaceAction): voi
   delete state.notice; delete state.redirectUrl;
   switch (action.type) {
     case "project.create": {
-      const project = { id: id("prj"), name: text(action.name, "サービス名", 200, true), website: safeWebsite(action.website ?? ""), description: text(action.description ?? "", "事業内容"), icp: text(action.icp ?? "", "理想の顧客"), createdAt: state.now, status: (state.mode === "simulation" ? "ready" : "needs_setup") as "ready" | "needs_setup", analysisSources: [] as string[], dailyBudgetCents: 500, monthlyBudgetCents: 10000, autopilot: false, geography:text(action.geography??"日本","対象地域",1000), segments:[] };
+      const project = { id: id("prj"), name: text(action.name, "サービス名", 200, true), website: safeWebsite(action.website ?? ""), description: text(action.description ?? "", "事業内容"), icp: text(action.icp ?? "", "理想の顧客"), createdAt: state.now, status: (state.mode === "simulation" ? "ready" : "needs_setup") as "ready" | "needs_setup", analysisSources: [] as string[], dailyBudgetCents: billingPolicy(state.billing.currency).defaultDailyMinor, monthlyBudgetCents: billingPolicy(state.billing.currency).defaultMonthlyMinor, autopilot: false, geography:text(action.geography??"日本","対象地域",1000), segments:[] };
       if (!project.website && !project.description) throw new ProductError("Webサイトまたは事業内容を入力してください。");
       state.projects.push(project); state.activeProjectId = project.id; recordActivity(state, `${project.name}を作成しました。`); break;
     }
@@ -160,12 +162,13 @@ export function applyAction(state: WorkspaceState, action: WorkspaceAction): voi
       const p = requireProject(state, action.projectId);
       const segmentIndex=integer(action.segmentIndex??0,"顧客セグメント",0,2),segment=p.segments[segmentIndex];
       const {name:_segmentName,...targeting}=segment??{name:"",...defaultTargeting(p.geography)};
-      state.campaigns.push({ id: id("cmp"), projectId: p.id, name: text(action.name ?? segment?.name ?? `${p.name}の新規開拓`, "キャンペーン名", 200, true), audience: text(action.audience ?? segment?.includeCriteria ?? p.icp, "対象顧客"), objective: text(action.objective ?? "初回相談の予約", "目的", 500), status: "review", dailyBudgetCents: Math.min(400, p.dailyBudgetCents), emailSubject: `${p.name}からのご相談`, emailBody: `{{name}}様\n\n{{company}}様の事業について、お話しできればと考えご連絡しました。\n\n${p.description}\n\nご関心がございましたら、短いお打ち合わせのお時間をいただけますか。`, followUpDays: [3, 7], autoReply: true, sentCount: 0, replyCount: 0, meetingCount: 0, createdAt: state.now, reviewEndsAt: new Date(new Date(state.now).getTime() + REVIEW_MS).toISOString(), reviewRemainingMs: null, upstreamCampaignId: null, language: "ja", sendWeekdays: [1,2,3,4,5], replyDelayMinutes: 15, targeting });
+      state.campaigns.push({ id: id("cmp"), projectId: p.id, name: text(action.name ?? segment?.name ?? `${p.name}の新規開拓`, "キャンペーン名", 200, true), audience: text(action.audience ?? segment?.includeCriteria ?? p.icp, "対象顧客"), objective: text(action.objective ?? "初回相談の予約", "目的", 500), status: "review", dailyBudgetCents: Math.min(billingPolicy(state.billing.currency).defaultCampaignMinor, p.dailyBudgetCents), emailSubject: `${p.name}からのご相談`, emailBody: `{{name}}様\n\n{{company}}様の事業について、お話しできればと考えご連絡しました。\n\n${p.description}\n\nご関心がございましたら、短いお打ち合わせのお時間をいただけますか。`, followUpDays: [3, 7], autoReply: true, sentCount: 0, replyCount: 0, meetingCount: 0, createdAt: state.now, reviewEndsAt: new Date(new Date(state.now).getTime() + REVIEW_MS).toISOString(), reviewRemainingMs: null, upstreamCampaignId: null, language: "ja", sendWeekdays: [1,2,3,4,5], replyDelayMinutes: 15, targeting });
       recordActivity(state, "キャンペーン案を作成しました。12時間のレビュー期間後に開始します。", "info", p.id); break;
     }
     case "campaign.update": {
       const c = requireCampaign(state, action.campaignId);
       if (c.status === "archived") throw new ProductError("編集するにはアーカイブから復元してください。", 409);
+      if(action.emailSubject!==undefined||action.emailBody!==undefined)for(const lead of state.leads)if(lead.campaignId===c.id)delete lead.preparedEmail;
       for (const key of ["name", "audience", "objective", "emailSubject", "emailBody"] as const) if (action[key] !== undefined) c[key] = text(action[key], key, key === "emailBody" ? 30000 : 10000, key === "name" || key === "emailBody" || key === "emailSubject");
       if (action.dailyBudgetCents !== undefined) c.dailyBudgetCents = integer(action.dailyBudgetCents, "日次予算", 0, 1000000);
       if (action.autoReply !== undefined) c.autoReply = bool(action.autoReply);
@@ -230,15 +233,15 @@ export function applyAction(state: WorkspaceState, action: WorkspaceAction): voi
       if (state.mode !== "simulation") throw new ProductError("本番環境では決済サービスでカードを確認してください。", 409);
       if (!markRequest(state, `verify:${action.requestId}`)) break;
       state.billing.billingConfigured = true; state.billing.paymentStatus = "verified"; state.billing.postpaidEnabled=true;
-      if (!state.billing.trialClaimed&&!state.billing.firstTopupCompleted) { state.billing.trialClaimed = true; state.billing.balanceCents += 3000; state.ledger.unshift({ id: id("entry"), projectId: null, campaignId: null, kind: "trial", amountCents: 3000, at: state.now, description: "カード確認をシミュレート：無料クレジット", dedupeKey: "simulation-trial" }); }
+      if (!state.billing.trialClaimed&&!state.billing.firstTopupCompleted) { state.billing.trialClaimed = true; state.billing.balanceCents += billingPolicy(state.billing.currency).trialMinor; state.ledger.unshift({ id: id("entry"), projectId: null, campaignId: null, kind: "trial", amountCents: billingPolicy(state.billing.currency).trialMinor, currency:state.billing.currency,priceVersion:state.billing.priceVersion,at: state.now, description: "カード確認をシミュレート：無料クレジット", dedupeKey: "simulation-trial" }); }
       recordActivity(state, "カード確認をシミュレートしました。実際の請求は発生していません。", "success"); break;
     }
     case "billing.topup": {
       if (state.mode !== "simulation") throw new ProductError("本番環境では決済画面から入金してください。", 409);
-      const amount = integer(action.amountCents, "入金額", 3000, 10000); if (![3000,5000,10000].includes(amount)) throw new ProductError("入金額は$30・$50・$100から選択してください。");
+      const amount = integer(action.amountCents, "入金額", 1, 15000); if (!(billingPolicy(state.billing.currency).topupMinor as readonly number[]).includes(amount)) throw new ProductError("指定できない前払い金額です。");
       if (!markRequest(state, `topup:${action.requestId}`)) break;
       const credit = state.billing.firstTopupCompleted||state.billing.trialClaimed ? amount : amount*2; state.billing.firstTopupCompleted=true;state.billing.billingConfigured=true;state.billing.paymentStatus="verified";state.billing.postpaidEnabled=true;
-      state.billing.balanceCents += credit; state.billing.topupStatus = "completed"; state.ledger.unshift({ id: id("entry"), projectId: null, campaignId: null, at: state.now, kind: "topup", amountCents: credit, description: `検証用クレジットの追加${credit>amount?"（初回特典2倍）":""}：実際の請求なし`, dedupeKey: `topup:${action.requestId}` }); recordActivity(state, "検証用クレジットを追加しました。", "success"); break;
+      state.billing.balanceCents += credit; state.billing.topupStatus = "completed"; state.ledger.unshift({ id: id("entry"), projectId: null, campaignId: null, at: state.now, kind: "topup", currency:state.billing.currency,priceVersion:state.billing.priceVersion,amountCents: credit, description: `検証用クレジットの追加${credit>amount?"（初回特典2倍）":""}：実際の請求なし`, dedupeKey: `topup:${action.requestId}` }); recordActivity(state, "検証用クレジットを追加しました。", "success"); break;
     }
     case "simulation.reply": {
       if (state.mode !== "simulation") throw new ProductError("検証操作は本番環境では使用できません。", 403);

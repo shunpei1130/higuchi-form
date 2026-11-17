@@ -145,13 +145,13 @@ async function billing(org:string,entryId:string){
   try{
     const api=await import("../providerBilling");
     let subscriptionId:string|undefined;
-    if(entry.kind==="trial")await api.activateBillingTrial({organizationId:org,requestId:entry.id,at:entry.at});
-    else if(entry.kind==="topup")await api.grantBillingTopup({organizationId:org,amountCents:entry.amountCents!,creditCents:entry.creditCents!,requestId:entry.id,at:entry.at});
+    if(entry.kind==="trial")await api.activateBillingTrial({organizationId:org,currency:entry.currency,requestId:entry.id,at:entry.at});
+    else if(entry.kind==="topup")await api.grantBillingTopup({organizationId:org,currency:entry.currency,amountCents:entry.amountCents!,creditCents:entry.creditCents!,requestId:entry.id,at:entry.at});
     else if(entry.kind==="configure"){
-      await api.configurePostpaidBilling({organizationId:org,requestId:entry.id});
-      const {getBillingCredentials}=await import("../billingCredentials");subscriptionId=(await getBillingCredentials(org))?.stripeSubscriptionId;
+      await api.configurePostpaidBilling({organizationId:org,currency:entry.currency,requestId:entry.id});
+      const {getBillingCredentials}=await import("../billingCredentials");subscriptionId=(await getBillingCredentials(org,entry.currency))?.stripeSubscriptionId;
     }
-    else await api.sendUsageEvent({organizationId:org,messageId:entry.messageId!,projectId:entry.projectId!,campaignId:entry.campaignId!,at:entry.at,kind:entry.messageKind!,firstAttemptAt:entry.firstAttemptAt});
+    else await api.sendUsageEvent({organizationId:org,currency:entry.currency,messageId:entry.messageId!,projectId:entry.projectId!,campaignId:entry.campaignId!,at:entry.at,kind:entry.messageKind!,firstAttemptAt:entry.firstAttemptAt});
     await mutateLive(async(state,tx)=>{const ready=state.billing.billingConfigured;if(completeBillingEntry(state,entry,subscriptionId)&&(!ready&&state.billing.billingConfigured||entry.kind==="topup"))await enqueueOwnerNotice(tx,{organizationId:org,enabled:state.settings.emailNotifications,kind:"billing",requestId:`completed:${entry.id}`});});
   }catch(error){
     const permanent=(error as {reconciliationRequired?:boolean}|null)?.reconciliationRequired===true;
