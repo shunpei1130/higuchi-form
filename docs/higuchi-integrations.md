@@ -1,6 +1,6 @@
 # higuchi-formの接続・運用手順
 
-公開先は **https://form-higuchi.vercel.app** です。AgentSDRを基盤にした独立実装で、Expleeの非公開コード、企業データベース、配信設備は含みません。顧客データの調達は今回の対象外で、実データはCSVから取り込みます。
+公開先は **https://form-higuchi.vercel.app** です。AgentSDRを基盤にした独立実装で、Expleeの非公開コード、企業データベース、配信設備は含みません。実データは後から用意するDB出力・CSV・Excelを運営者が公開します。新しい外部顧客データサービスとの契約は不要です。
 
 ## 現在の構成と確認範囲
 
@@ -26,6 +26,8 @@ Vercelの対象は`form-higuchi`です。Productionへ設定し、Previewへ本�
 | 環境変数 | 内容 |
 | --- | --- |
 | `HIGUCHI_MODE` | 本番は`live`。ローカルの模擬確認だけ`simulation` |
+| `AUTH_SIGNUP` | 公開サービスは`open`。メール確認後に個人ワークスペースを作成する。コードの既定は`invite-only` |
+| `HIGUCHI_PUBLIC_PREVIEW` | 準備中は`false`。匿名調査のAPIとworkerを止め、LPはログイン後の事業設定へ進む。公開準備後に`true` |
 | `BETTER_AUTH_URL`・`NEXT_PUBLIC_APP_URL` | `https://form-higuchi.vercel.app` |
 | `DATABASE_URL` | 本番PostgreSQL。実行時は接続プールを利用可能 |
 | `DATABASE_URL_UNPOOLED` | スキーマ更新用の直接接続先 |
@@ -40,7 +42,11 @@ Vercelの対象は`form-higuchi`です。Productionへ設定し、Previewへ本�
 
 ```sh
 bun scripts/db/higuchi-setup.ts --check
+bun scripts/db/higuchi-preview.ts --check
+bun scripts/db/higuchi-catalog-guarantee.ts --check
 bun scripts/db/higuchi-setup.ts
+bun scripts/db/higuchi-preview.ts
+bun scripts/db/higuchi-catalog-guarantee.ts
 ```
 
 キーをチャット、ソース、Git、コマンド引数へ貼り付けないでください。ファイルで渡す場合はリポジトリ外の本人だけが読める場所に保存します。例は`C:\Users\<ユーザー名>\.config\higuchi-form\stripe-test-key.txt`です。内容の表示やログ出力は行いません。公開先への登録は非公開ファイルからメモリへ読み取り、標準入力を通じてVercelの機密環境変数へ渡します。実際のキーをこの文書や`.env.example`へ保存しないでください。
@@ -121,20 +127,27 @@ https://form-higuchi.vercel.app/api/higuchi/mail/resend/webhook
 | --- | --- |
 | `STRIPE_SECRET_KEY` | 運営用の制限付きキーを推奨 |
 | `STRIPE_ACCOUNT_ID` | キーが属する`acct_...`。実際の接続先をAPIで照合 |
-| `STRIPE_PRODUCT_ID` | 専用`prod_...` |
-| `STRIPE_METER_ID` | 専用`mtr_...` |
-| `STRIPE_PRICE_ID` | 1通US$0.04の専用`price_...` |
-| `STRIPE_METER_EVENT_NAME` | 既定値`higuchi_email_sent_v1`。メーターと同じ値 |
+| `HIGUCHI_BILLING_CURRENCY` | 新しい利用は`JPY`。既存USD顧客を自動換算しない |
+| `STRIPE_JPY_PRODUCT_ID` | 円建て専用`prod_...` |
+| `STRIPE_JPY_METER_ID` | 円建て専用`mtr_...` |
+| `STRIPE_JPY_PRICE_ID` | 1通6円の円建て専用`price_...` |
+| `STRIPE_JPY_METER_EVENT_NAME` | `higuchi_email_sent_jpy_v1`。円用メーターと同じ値 |
+| `STRIPE_PRODUCT_ID`・`STRIPE_METER_ID`・`STRIPE_PRICE_ID`・`STRIPE_METER_EVENT_NAME` | 既存USD利用の専用カタログ。旧料金は1通US$0.04。JPY用IDで上書きしない |
 | `STRIPE_WEBHOOK_SECRET` | 共通通知先の署名シークレット |
-| `STRIPE_PUBLISHABLE_KEY` | 任意。現在のホスト型Checkoutには不要。埋め込み型では同じ環境の公開キーが必要 |
+| `STRIPE_PUBLISHABLE_KEY` | 埋め込み決済に必須。同じアカウント・テスト／本番環境の`pk_...`を、Vercelでは`encrypted`として保存する。`NEXT_PUBLIC_`変数へ複製しない |
+| `HIGUCHI_SANDBOX_RETURN_ORIGIN` | StripeネイティブTEST試験の戻り先。隔離したPreviewのHTTPS originを明示する。Production URLは使わない |
 
-APIバージョンは`2026-10-28.endive`です。テスト・本番のキー、商品、料金、メーター、通知署名を混在させないでください。組織の顧客・契約対応は`grid_providers`と`grid_provider_credentials`の`higuchi-billing`へ保存します。運営用キーは公開先の機密環境変数に置き、組織設定へ複製しません。
+APIバージョンは`2026-10-28.endive`です。テスト・本番やJPY・USDのキーとカタログを混在させないでください。組織の顧客・契約対応は`grid_providers`と`grid_provider_credentials`の`higuchi-billing`へ保存します。運営用キーは公開先の機密環境変数に置き、組織設定へ複製しません。ブラウザーには本人確認後の決済に必要な公開キーだけを返します。
 
 テスト用のデータベース・ワークスペースと本番用は分けてください。保存済みの顧客・契約IDを別の環境へ自動で引き継ぐことはできません。本番顧客を接続した後に同じ公開先のキーだけをテスト用へ変更すると、その顧客の処理は停止します。
 
 ### 専用カタログの作成
 
 起動時・Checkout時にはカタログを作成しません。次の明示的なコマンドで専用商品・メーター・料金を作成・再利用します。
+
+JPY用の運営者向け作成手順は`higuchi-stripe-provision.ts --key-stdin --currency JPY --catalog-only`です。許可済みのテストアカウントを`--account-id`で指定し、秘密キーは非表示の標準入力から渡します。本番は別のID・キーで照合し、明示的な`--allow-live`が必要です。出力した円用IDは`STRIPE_JPY_*`へ設定します。
+
+以下は従来の非公開キーファイルを使う方法です。実行環境の`HIGUCHI_BILLING_CURRENCY`を確認し、USDの既存カタログをJPY用として登録しないでください。
 
 ```sh
 bun --conditions=react-server scripts/higuchi-stripe-catalog.ts --key-file "<リポジトリ外の非公開テストキーファイル>" --account-id acct_1SOtr4EXrauv37Rg
@@ -189,15 +202,15 @@ https://form-higuchi.vercel.app/api/webhooks/stripe
 
 ### 料金・クレジット・失敗時の扱い
 
-初回・フォローアップメールはGmailの受付確認後に1通US$0.04を記録します。返信は無料でイベントを送りません。固定月額はありません。送信前の予算予約と利用イベントの配信は永続化します。
+新しい円建て利用では、初回・フォローアップメールはGmailの受付確認後に1通6円を記録します。返信は無料でイベントを送りません。固定月額はありません。送信前の予算予約と利用イベントの配信は永続化します。既存USD利用の料金・顧客・契約は保持します。
 
-- カード登録から始める場合は、CheckoutとSetup Intentの成功を確認し、請求用の既定支払方法を設定して、1組織1回のUS$30無料クレジットを付与します。
-- 前払いはUS$30・US$50・US$100です。実際の支払額を確認して支払済みクレジットを付与し、初回特典の対象なら同額の無料クレジットを追加します。
-- **無料US$30と初回前払い2倍はどちらか一方**です。組織のロック下で競合・重複を防ぎます。
+- カード登録から始める場合は、CheckoutとSetup Intentの成功を確認し、請求用の既定支払方法を設定して、1組織1回の4,500円無料クレジットを付与します。
+- 前払いは4,500円・7,500円・15,000円です。実際の支払額を確認して支払済みクレジットを付与し、初回特典の対象なら同額の無料クレジットを追加します。
+- **無料4,500円と初回前払い2倍はどちらか一方**です。組織のロック下で競合・重複を防ぎます。
 - Stripeへのクレジット反映が完了するまで、アプリの利用可能残高には加えません。
-- 月次の従量課金契約にUS$5の請求閾値を設定します。集計によりUS$5を超える場合があり、月末はUS$5未満の残額も精算します。即時の請求額上限ではありません。
+- 月次の従量課金契約に750円の請求閾値を設定します。集計により750円を超える場合があり、月末は750円未満の残額も精算します。即時の請求額上限ではありません。
 
-クレジットは専用メーター料金だけに適用します。割引後・税計算前に使われ、請求確定時に消費されます。購入済みクレジットを再請求したり、クレジットで精算された請求を二重入金として加算したりしません。税の扱いは本番販売前に確定し、方針・登録を確認せずに自動税計算を有効にしません。
+クレジットは専用メーター料金だけに適用し、請求確定時に消費します。購入済みクレジットを再請求したり、クレジットで精算された請求を二重入金として加算したりしません。今回の承認に従いStripeの自動税計算は使わず、表示金額のまま扱います。
 
 利用イベントIDは送信IDから固定で作ります。**初回試行から23時間を超えた不明なイベントは自動再送せず、運営者の照合へ回します。** 別に、利用日時はStripeが受け付ける過去35日・未来5分以内である必要があります。35日間再送してよいという意味ではありません。StripeへのHTTP要求は1回25秒、同じ操作内では合計55秒を上限にします。
 
@@ -212,6 +225,24 @@ https://form-higuchi.vercel.app/api/webhooks/stripe
 送信準備、送信、照合、返信同期、AI分析、課金反映、通知はPostgreSQLへ保存します。短い要求の中で期限付きの処理権を取得し、失敗時は待機して再試行します。Webサーバーや画面の接続を常駐ジョブに使いません。Vercelでは既存基盤の常駐処理も起動しません。`HIGUCHI_ENABLE_LEGACY_WORKERS`は有効にしないでください。
 
 Cronの応答は`processed`・`failed`です。失敗が続く場合は実行ログと永続キューを確認し、秘密キー・本文・トークンのログ出力を追加しないでください。Cron停止中は設定済みでも送信・通知が進みません。
+
+## 9. ログイン前の調査と顧客データ
+
+公開準備中は`HIGUCHI_PUBLIC_PREVIEW=false`にします。トップのURL・事業入力は従来のログイン後の事業設定へ進み、匿名APIと調査workerは停止します。追加スキーマと円用Stripe設定を確認してから`true`へ変更します。この変数と`HIGUCHI_SEND_ENABLED`は別で、調査を公開しても営業送信を停止したまま確認できます。
+
+有効時は`/auto-gtm/company/<domain>/explore`または`/auto-gtm/business/explore`で、会社調査、競合調査、キャンペーン設計、企業候補、意思決定者、個別メールの6工程を表示します。競合は検索で根拠を確認した最大15社、キャンペーンは3〜6つ、プレビューの個別メールは全キャンペーンから配分した最大9通です。Web検索は1調査につき合計3回に制限します。
+
+匿名結果は推測しにくいCookieで所有者を照合し、24時間保存します。期限後は入力・会社情報・候補・文面・エラー本文を消去します。AI費用の台帳、処理ID、本人確認後に取り込んだワークスペースは保持します。匿名調査もOpenAIの全体月額20米ドル上限に含まれます。
+
+`/operator/catalog`ではCSV、Excel、DB出力を取り込み、内容を確認して公開できます。非公開のデータと各組織の私有顧客リストは匿名検索の対象にしません。公開済みデータをキャンペーンの短い業種キーワード、地域、役職、会社規模で絞り込みます。検証状態が不明・catch-allならそのまま表示し、有効判定を創作しません。
+
+データが未公開の場合は候補とメールを架空のサンプルとして表示し、本人確認後の取り込み、カード登録、課金、送信を禁止します。公開済みデータに一致しなかった場合は0件と表示します。新しい外部顧客データサービスの契約やExplee APIの接続は必要ありません。
+
+実候補がある場合だけ、画面内のOTP本人確認、保存済み結果の取り込み、Stripe Payment Elementへ進みます。利用規約と、初回・追客・設定に従った返信対応の開始を確認します。取り込みだけでは送信せず、確認した決済セッションの署名付き通知と保存文面を照合してから開始します。追加認証から戻ったときは既存の決済を再確認し、新たな支払いを作らず再開します。
+
+`HIGUCHI_PREVIEW_FIXTURE=true`は専用テストDBかローカルDBでの画面確認用です。会社・競合も固定の架空データになり、外部AI・探索は呼びません。本番Vercelでは拒否し、サンプル決済もできません。ProductionとPreviewの秘密情報・データベースは分離してください。
+
+返金保証の申請は`/app/billing`、運営者の確認・審査は`/operator/refunds`で行います。対象条件は`src/lib/higuchi/guaranteePolicy.ts`に集約しています。申請や審査だけでStripeから自動返金は行いません。
 
 ## 最初の確認順序
 

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Activity, Campaign, CampaignTargeting, Conversation, IntegrationStates, Lead, WorkspaceSnapshot } from "./types";
+import { billingPolicy, type MoneyCurrency } from "./money";
 
 export type OutboxItem = {
   id: string; projectId: string; campaignId: string; leadId: string; conversationId: string | null;
@@ -12,7 +13,7 @@ export type OutboxItem = {
 export type WorkspaceState = WorkspaceSnapshot & {
   internal: { clockOffsetMs: number; processedRequests: string[]; suppressions: string[]; outbox: OutboxItem[]; providerEvents: string[]; billingJobs: BillingJob[]; refundTotals: Record<string, number>; autopilotDays:Record<string,string> };
 };
-export type BillingJob = { id: string; kind: "trial" | "topup" | "usage" | "configure"; status: "pending" | "running" | "complete" | "failed"; amountCents?: number; creditCents?: number; projectId?: string; campaignId?: string; messageId?: string; messageKind?: "initial" | "followup"; at: string; error?: string; attempts?:number; retryAt?:string; lockedAt?:string; firstAttemptAt?:string };
+export type BillingJob = { currency?: MoneyCurrency; priceVersion?: string; id: string; kind: "trial" | "topup" | "usage" | "configure"; status: "pending" | "running" | "complete" | "failed"; amountCents?: number; creditCents?: number; projectId?: string; campaignId?: string; messageId?: string; messageKind?: "initial" | "followup"; at: string; error?: string; attempts?:number; retryAt?:string; lockedAt?:string; firstAttemptAt?:string };
 export class ProductError extends Error {
   constructor(message: string, readonly status = 400, readonly code = "INVALID_ACTION") { super(message); }
 }
@@ -30,11 +31,12 @@ export function emptyIntegrations(): IntegrationStates {
   return { ai: s("AI接続が必要です"), email: s("Googleメールの本人認証が必要です"), booking: s("内蔵予約ページを設定・公開してください"), billing: s("Stripeの接続が必要です") };
 }
 export function defaultTargeting(geography="日本"):CampaignTargeting{return {locations:geography?[geography]:[],roles:[],companySizes:[],includeCriteria:"",excludeCriteria:"連絡停止済みの宛先",valueProposition:"",painPoints:"",emailInstructions:"日本語で事実に基づいて簡潔に案内する"};}
-export function createWorkspace(mode: WorkspaceSnapshot["mode"], now = new Date().toISOString()): WorkspaceState {
+export function createWorkspace(mode: WorkspaceSnapshot["mode"], now = new Date().toISOString(), currency: MoneyCurrency = process.env.HIGUCHI_BILLING_CURRENCY === "JPY" ? "JPY" : "USD"): WorkspaceState {
+  const policy = billingPolicy(currency);
   const state: WorkspaceState = {
     version: 1, mode, now, activeProjectId: null, projects: [], campaigns: [], leads: [], conversations: [], meetings: [], ledger: [], activity: [],
     settings: { displayName: "", companyName: "", timezone: "Asia/Tokyo", language: "ja", bookingUrl: "", autoReply: true, emailNotifications: true },
-    billing: { currency: "USD", balanceCents: 0, spentCents: 0, dailySpentCents: 0, emailPriceCents: 4, billingConfigured: false, customerId: null, paymentStatus: "unconfigured", trialClaimed: false, topupStatus: "idle", postpaidEnabled:false, firstTopupCompleted:false, pendingCreditCents:0 },
+    billing: { currency, priceVersion: policy.priceVersion, balanceCents: 0, spentCents: 0, dailySpentCents: 0, emailPriceCents: policy.emailMinor, billingConfigured: false, customerId: null, paymentStatus: "unconfigured", trialClaimed: false, topupStatus: "idle", postpaidEnabled:false, firstTopupCompleted:false, pendingCreditCents:0 },
     integrations: mode === "simulation" ? simulationIntegrations() : emptyIntegrations(),
     internal: { clockOffsetMs: 0, processedRequests: [], suppressions: [], outbox: [], providerEvents: [], billingJobs: [], refundTotals:{}, autopilotDays:{} },
   };
@@ -48,6 +50,7 @@ export function createWorkspace(mode: WorkspaceSnapshot["mode"], now = new Date(
     }
     recordActivity(state, "検証環境を準備しました。サンプルの連絡先・送信・課金はすべて架空です。", "info");
   }
+  if(currency==="JPY"){for(const p of state.projects){p.dailyBudgetCents=policy.defaultDailyMinor;p.monthlyBudgetCents=policy.defaultMonthlyMinor;}for(const c of state.campaigns)c.dailyBudgetCents=policy.defaultCampaignMinor;}
   return state;
 }
 export function snapshot(state: WorkspaceState): WorkspaceSnapshot {
@@ -57,12 +60,25 @@ export function snapshot(state: WorkspaceState): WorkspaceSnapshot {
 /** Additive upgrades for a local file or existing aggregate created by an earlier build. */
 export function normalizeWorkspaceState(state:WorkspaceState):WorkspaceState {
   const defaults=createWorkspace("live",state.now);
+  // Old aggregates are USD even after the default for new workspaces changes.
+  state.billing.currency ??= "USD";
+  const savedPriceVersion=state.billing.priceVersion??billingPolicy(state.billing.currency).priceVersion;
   state.billing={...defaults.billing,...state.billing};state.settings={...defaults.settings,...state.settings};
+  state.billing.priceVersion=savedPriceVersion;
+  for (const entry of state.ledger) { entry.currency ??= state.billing.currency; entry.priceVersion ??= state.billing.priceVersion; }
   state.internal={...defaults.internal,...state.internal};
   for(const p of state.projects){p.dailyBudgetCents??=500;p.monthlyBudgetCents??=10000;p.autopilot??=false;p.geography??="日本";p.segments??=[];}
   for(const c of state.campaigns){c.language??="ja";c.sendWeekdays??=[1,2,3,4,5];c.replyDelayMinutes??=15;c.targeting??=defaultTargeting(state.projects.find(p=>p.id===c.projectId)?.geography);}
   for(const t of state.conversations)t.notes??="";
   return state;
+}
+/** A zero-money workspace can adopt the new price. No balances, receipts or pending operations are converted. */
+export function activateJpyBilling(state: WorkspaceState): void {
+  if (state.billing.currency === "JPY") return;
+  if (state.ledger.length || state.internal.outbox.length || state.internal.billingJobs.length || state.billing.customerId || state.billing.subscriptionId || state.billing.balanceCents || state.billing.spentCents || state.billing.pendingCreditCents || state.billing.trialClaimed || state.billing.firstTopupCompleted) throw new ProductError("以前の米ドル残高・契約の照合が必要です。円の残高へ自動変換はしません。",409,"LEGACY_BILLING_ACTIVE");
+  const policy=billingPolicy("JPY");state.billing.currency="JPY";state.billing.priceVersion=policy.priceVersion;state.billing.emailPriceCents=policy.emailMinor;
+  for (const p of state.projects) { p.dailyBudgetCents=Math.round(p.dailyBudgetCents*1.5);p.monthlyBudgetCents=Math.round(p.monthlyBudgetCents*1.5); }
+  for (const c of state.campaigns) c.dailyBudgetCents=Math.round(c.dailyBudgetCents*1.5);
 }
 export function requireProject(state: WorkspaceState, projectId: string) {
   const project = state.projects.find((x) => x.id === projectId);

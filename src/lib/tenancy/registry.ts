@@ -25,6 +25,7 @@ const snake = (table: string): ScopedTable => ({ table, column: "organization_id
 const pascal = (table: string): ScopedTable => ({ table, column: "organizationId" });
 
 export const SCOPED_TABLES: readonly ScopedTable[] = [
+  snake("higuchi_refund_requests"),
   snake("higuchi_workspaces"),
   snake("higuchi_ai_usage"),
   snake("higuchi_mail_receipts"),
@@ -130,8 +131,17 @@ export const INHERITED: Readonly<Record<string, string>> = {
 
 /** Shared by every organization: public reference data, fixed system rows, job logs. */
 export const GLOBAL: readonly string[] = [
+  // Operator-published prospect reference data; private tenant CRM imports never enter it.
+  "higuchi_prospect_datasets",
+  "higuchi_prospect_records",
   // Private dispatcher queue, including pre-login auth mail without a tenant.
   "higuchi_jobs",
+  // Private anonymous staging, owned by a hashed browser token rather than a tenant.
+  "higuchi_preview_sessions",
+  "higuchi_preview_runs",
+  "higuchi_preview_daily_limits",
+  "higuchi_preview_worker_slots",
+  "higuchi_preview_ai_usage",
   "domains",
   "clean_domains",
   "crm_categories",

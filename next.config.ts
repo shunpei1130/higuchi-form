@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
   // The Google SDK contains every Google service; keep it in the Node
   // runtime rather than rebundling the entire SDK for each provider route.
   serverExternalPackages: ["googleapis"],
-  experimental: { cpus: 2 },
+  experimental: { cpus: 1, webpackMemoryOptimizations: true },
 
   // A second dev server beside the usual one (e.g. the demo, DEMO_MODE=true,
   // on its own database) needs its own build directory: two `next dev` in one

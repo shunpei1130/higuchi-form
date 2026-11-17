@@ -10,6 +10,7 @@ import { Logo } from "@/components/brand/Logo";
 import Sidebar from "@/components/Sidebar";
 import { SessionGate } from "@/components/auth/SessionGate";
 import { DemoBanner } from "@/components/demo/DemoProvider";
+import { isPublicPreviewPage } from "@/lib/higuchi/boundary";
 
 const CHROMELESS_ROUTES = [
   "/login",
@@ -31,7 +32,7 @@ const CHROMELESS_ROUTES = [
 
 /** The sign-in screens: no sidebar, no app chrome. */
 export function isChromeless(pathname: string) {
-  return pathname === "/" || pathname === "/operator" || pathname === "/app" || pathname.startsWith("/app/") || pathname.startsWith("/info/") || CHROMELESS_ROUTES.some((route) => pathname === route || pathname.startsWith(`${route}/`));
+  return pathname === "/" || isPublicPreviewPage(pathname) || pathname === "/operator" || pathname.startsWith("/operator/") || pathname === "/app" || pathname.startsWith("/app/") || pathname.startsWith("/info/") || CHROMELESS_ROUTES.some((route) => pathname === route || pathname.startsWith(`${route}/`));
 }
 
 /**

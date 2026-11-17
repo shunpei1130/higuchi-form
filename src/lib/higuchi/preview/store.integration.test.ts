@@ -1,0 +1,54 @@
+import { expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+const testDatabase=process.env.HIGUCHI_PREVIEW_TEST_DATABASE_URL;
+if(testDatabase&&process.env.DATABASE_URL!==testDatabase)throw new Error("匿名調査の試験は専用TEST DBに限定してください。");
+test.skipIf(!testDatabase)("実DB: 匿名cookie分離・日次並列quota・2worker上限・lease fencing・claim rollback",async()=>{
+  const [{db},{and,eq,inArray,sql},tables,store,{organizations}]=await Promise.all([import("@/lib/db"),import("drizzle-orm"),import("./schema"),import("./store"),import("@/lib/auth/schema")]);
+  const {higuchiPreviewRuns:runs,higuchiPreviewSessions:sessions,higuchiPreviewDailyLimits:limits,higuchiPreviewWorkerSlots:slots}=tables;
+  const oldVercel=process.env.VERCEL,oldSecret=process.env.BETTER_AUTH_SECRET;process.env.VERCEL="1";process.env.BETTER_AUTH_SECRET=`preview-fixture-${randomUUID()}`;
+  const ip=`fixture-${randomUUID()}`,day=new Date().toISOString().slice(0,10),requests=Array.from({length:4},()=>new Request("https://preview.test/api/previews",{headers:{"x-vercel-forwarded-for":ip}}));
+  const sessionIds:string[]=[],runIds:string[]=[],ownerIds:string[]=[],usageIds:string[]=[];const org=randomUUID();
+  try{
+    const attempts=await Promise.allSettled(requests.map(request=>store.createPreview(request,{website:"https://seller.example/",business:"業務改善",customer:"製造業",geography:"日本"})));
+    const successes=attempts.flatMap(a=>a.status==="fulfilled"?[a.value]:[]);expect(successes).toHaveLength(3);expect(attempts.filter(a=>a.status==="rejected")).toHaveLength(1);
+    runIds.push(...successes.map(s=>s.snapshot.id));
+    const fixtureRows=await db.select().from(runs).where(inArray(runs.id,runIds));sessionIds.push(...fixtureRows.map(r=>r.sessionId));
+    const request=(cookie:string)=>new Request("https://preview.test/api/previews",{headers:{Cookie:cookie.split(";")[0],"x-vercel-forwarded-for":ip}});
+    const a=request(successes[0].cookie!),b=request(successes[1].cookie!);
+    await expect(store.getPreview(b,runIds[0])).rejects.toThrow("調査が見つかりません");
+    expect((await store.createPreview(a,{website:"https://seller.example/",business:"業務改善",customer:"製造業",geography:"日本"})).snapshot.id).toBe(runIds[0]);
+    await expect(store.createPreview(a,{website:"https://different.example/"})).rejects.toThrow("実行中");
+    const claims=await Promise.all(runIds.map(id=>store.claimPreviewStage(id)));expect(claims.filter(Boolean)).toHaveLength(2);ownerIds.push(...claims.flatMap(c=>c?[c.owner]:[]));
+    const first=claims.find(Boolean)!;
+    await db.update(runs).set({leaseUntil:new Date(Date.now()-60000)}).where(and(eq(runs.id,first.run.id),eq(runs.lockedBy,first.owner)));
+    await db.update(slots).set({leaseUntil:new Date(Date.now()-60000)}).where(and(eq(slots.slot,first.slot),eq(slots.owner,first.owner)));
+    const recovered=await store.claimPreviewStage(first.run.id);expect(recovered).not.toBeNull();ownerIds.push(recovered!.owner);expect(recovered!.owner).not.toBe(first.owner);
+    expect(await store.settlePreviewStage(first,first.run.state)).toBe(false);expect(await store.settlePreviewStage(recovered!,recovered!.run.state)).toBe(true);
+    const other=claims.find(c=>c&&c.run.id!==first.run.id)!;expect(await store.settlePreviewStage(other,other.run.state)).toBe(true);
+    await db.insert(organizations).values({id:org,name:"匿名取り込み試験",slug:`preview-test-${org}`});
+    await db.update(runs).set({status:"ready",stageIndex:6}).where(eq(runs.id,runIds[0]));
+    const projectId=randomUUID();
+    await expect(db.transaction(async tx=>{const owned=await store.lockOwnedPreview(tx,a,runIds[0]);await store.markPreviewClaimed(tx,owned,org,projectId);throw new Error("fixture-rollback");})).rejects.toThrow("fixture-rollback");
+    expect((await store.getPreview(a,runIds[0])).status).toBe("ready");
+    const claimResults=await Promise.all([1,2].map(()=>db.transaction(async tx=>{const owned=await store.lockOwnedPreview(tx,a,runIds[0]);if(owned.status==="claimed")return owned.claimedProjectId;await store.markPreviewClaimed(tx,owned,org,projectId);return projectId;})));
+    expect(new Set(claimResults).size).toBe(1);expect((await store.getPreview(a,runIds[0])).status).toBe("claimed");
+    await expect(store.patchPreview(a,runIds[0],{revision:(await store.getPreview(a,runIds[0])).revision,action:{type:"retry"}})).rejects.toThrow("取り込み済み");
+    const [{scrubExpiredPreviews},{higuchiWorkspaces},{createWorkspace}]=await Promise.all([import("./retention"),import("../schema"),import("../state")]);
+    const privateWorkspace=createWorkspace("live",undefined,"JPY");privateWorkspace.settings.companyName="非公開ワークスペースの保持確認";await db.insert(higuchiWorkspaces).values({organizationId:org,state:privateWorkspace});
+    const [usage]=await db.insert(tables.higuchiPreviewAiUsage).values({runId:runIds[0],requestKey:`retention-fixture-${randomUUID()}`,month:day.slice(0,7),model:"gpt-6-luna",reservedMicros:5000,actualMicros:1234,status:"completed"}).returning();usageIds.push(usage.id);
+    await db.update(runs).set({expiresAt:new Date(Date.now()-60000),errorMessage:"仮の個人情報",lockedBy:"expired-owner",leaseUntil:new Date(Date.now()+60000)}).where(eq(runs.id,runIds[0]));
+    const expiredSession=fixtureRows.find(row=>row.id===runIds[0])!.sessionId;await db.update(sessions).set({expiresAt:new Date(Date.now()-60000)}).where(eq(sessions.id,expiredSession));
+    await scrubExpiredPreviews();
+    const [scrubbed]=await db.select().from(runs).where(eq(runs.id,runIds[0]));expect(scrubbed.status).toBe("claimed");expect(scrubbed.claimedProjectId).toBe(projectId);expect(scrubbed.input.website).toBe("");expect(scrubbed.state.company).toBeNull();expect(scrubbed.errorMessage).toBeNull();expect(scrubbed.lockedBy).toBeNull();
+    const [retainedCost]=await db.select().from(tables.higuchiPreviewAiUsage).where(eq(tables.higuchiPreviewAiUsage.id,usage.id));expect(retainedCost).toMatchObject({runId:runIds[0],actualMicros:1234,reservedMicros:5000});
+    expect((await db.select().from(higuchiWorkspaces).where(eq(higuchiWorkspaces.organizationId,org)))[0].state.settings.companyName).toBe("非公開ワークスペースの保持確認");
+    expect((await db.select().from(sessions).where(eq(sessions.id,expiredSession)))[0].tokenHash).toBe(`expired:${expiredSession}`);await expect(store.getPreview(a,runIds[0])).rejects.toThrow();
+    expect((await store.getPreview(b,runIds[1])).id).toBe(runIds[1]);await scrubExpiredPreviews();expect((await db.select().from(runs).where(eq(runs.id,runIds[0])))[0].revision).toBe(scrubbed.revision);
+  }finally{
+    if(ownerIds.length)await db.update(slots).set({owner:null,leaseUntil:null}).where(inArray(slots.owner,ownerIds));
+    if(usageIds.length)await db.delete(tables.higuchiPreviewAiUsage).where(inArray(tables.higuchiPreviewAiUsage.id,usageIds));
+    if(runIds.length)await db.delete(runs).where(inArray(runs.id,runIds));if(sessionIds.length)await db.delete(sessions).where(inArray(sessions.id,sessionIds));
+    await db.delete(limits).where(eq(limits.ipDayHash,store.previewIpDayHash(requests[0],day)));await db.delete(organizations).where(eq(organizations.id,org));
+    if(oldVercel===undefined)delete process.env.VERCEL;else process.env.VERCEL=oldVercel;if(oldSecret===undefined)delete process.env.BETTER_AUTH_SECRET;else process.env.BETTER_AUTH_SECRET=oldSecret;
+  }
+},60000);

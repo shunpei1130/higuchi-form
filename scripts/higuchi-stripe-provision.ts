@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BillingCredentials } from "../src/lib/higuchi/billingCredentials";
+import type { MoneyCurrency } from "../src/lib/higuchi/money";
 
 const SANDBOX_ACCOUNT="acct_1UcblRRGx64luiLk",LIVE_ACCOUNT="acct_1SOtr4EXrauv37Rg";
 const PROJECT="prj_Jfz4TuWBMR7mPl59pIaISCCve6JV",TEAM="team_Iic3HLNmnGRA51i7VKtiOMmN";
@@ -18,32 +19,38 @@ const digest=(value:string)=>createHash("sha256").update(value).digest("hex");
 class ProvisionError extends Error{constructor(readonly stage:string,readonly code:string,readonly parameter?:string){super(code);}}
 function fail(stage:string,code:string,parameter?:string):never{throw new ProvisionError(stage,code,parameter);}
 
-export function parseProvisionArguments(args:string[]):{accountId:string;allowLive:boolean;webhookUrl:string;keyStdin:boolean;catalogOnly:boolean;help:boolean}{
-  let accountId="",allowLive=false,webhookUrl="",keyStdin=false,catalogOnly=false,help=false;
+export function parseProvisionArguments(args:string[]):{accountId:string;allowLive:boolean;webhookUrl:string;keyStdin:boolean;catalogOnly:boolean;help:boolean;currency:MoneyCurrency}{
+  let accountId="",allowLive=false,webhookUrl="",keyStdin=false,catalogOnly=false,help=false,currency:MoneyCurrency="USD";
   for(let index=0;index<args.length;index++){
     const argument=args[index];
     if(argument==="--help"){help=true;continue;}
     if(argument==="--key-stdin"){keyStdin=true;continue;}
     if(argument==="--allow-live"){allowLive=true;continue;}
     if(argument==="--catalog-only"||argument==="--skip-webhook"){catalogOnly=true;continue;}
-    if(argument==="--account-id"||argument==="--webhook-url"){
+    if(argument==="--account-id"||argument==="--webhook-url"||argument==="--currency"){
       const value=args[++index];if(!value||value.startsWith("--"))fail("arguments","MISSING_OPTION_VALUE");
-      if(argument==="--account-id")accountId=value;else webhookUrl=value;continue;
+      if(argument==="--account-id")accountId=value;else if(argument==="--webhook-url")webhookUrl=value;else {if(value!=="JPY"&&value!=="USD")fail("arguments","UNSUPPORTED_CURRENCY");currency=value;}continue;
     }
     fail("arguments","UNKNOWN_OPTION");
   }
-  if(help)return {accountId,allowLive,webhookUrl,keyStdin,catalogOnly,help};
+  if(help)return {accountId,allowLive,webhookUrl,keyStdin,catalogOnly,help,currency};
   if(!keyStdin)fail("arguments","KEY_STDIN_REQUIRED");
   if(![SANDBOX_ACCOUNT,LIVE_ACCOUNT].includes(accountId))fail("arguments","UNAPPROVED_ACCOUNT");
   if(accountId===LIVE_ACCOUNT&&!allowLive)fail("arguments","LIVE_REQUIRES_EXPLICIT_FLAG");
-  if(catalogOnly)return {accountId,allowLive,webhookUrl:"",keyStdin,catalogOnly,help};
+  if(currency==="JPY"&&!catalogOnly)fail("arguments","JPY_REQUIRES_CATALOG_ONLY");
+  if(catalogOnly)return {accountId,allowLive,webhookUrl:"",keyStdin,catalogOnly,help,currency};
   if(!webhookUrl){if(accountId===LIVE_ACCOUNT)webhookUrl="https://form-higuchi.vercel.app/api/webhooks/stripe";else fail("arguments","SANDBOX_PREVIEW_WEBHOOK_URL_REQUIRED");}
   let url:URL;try{url=new URL(webhookUrl);}catch{fail("arguments","INVALID_WEBHOOK_URL");}
   const projectHost=url.hostname==="form-higuchi.vercel.app"||url.hostname.startsWith("form-higuchi-")&&url.hostname.endsWith(".vercel.app");
   if(url.protocol!=="https:"||url.username||url.password||!projectHost||url.pathname!=="/api/webhooks/stripe"||url.hash)fail("arguments","INVALID_WEBHOOK_URL");
   if(accountId===SANDBOX_ACCOUNT&&url.hostname==="form-higuchi.vercel.app")fail("arguments","SANDBOX_REQUIRES_PREVIEW_URL");
   if(accountId===LIVE_ACCOUNT&&url.href!=="https://form-higuchi.vercel.app/api/webhooks/stripe")fail("arguments","LIVE_REQUIRES_PRODUCTION_URL");
-  return {accountId,allowLive,webhookUrl:url.href,keyStdin,catalogOnly,help};
+  return {accountId,allowLive,webhookUrl:url.href,keyStdin,catalogOnly,help,currency};
+}
+/** Explicit CLI currency wins over ambient deployment defaults; never changes the runtime key's rights. */
+export function provisionCatalogEnvironment(env:Record<string,string|undefined>,currency:MoneyCurrency):Record<string,string|undefined>{
+  const eventField=currency==="JPY"?"STRIPE_JPY_METER_EVENT_NAME":"STRIPE_METER_EVENT_NAME";
+  return {...env,HIGUCHI_BILLING_CURRENCY:currency,[eventField]:currency==="JPY"?"higuchi_email_sent_jpy_v1":"higuchi_email_sent_v1"};
 }
 export function validateProvisionKey(key:string,accountId:string):boolean{
   if(!/^(?:rk|sk)_(?:test|live)_[A-Za-z0-9]+$/.test(key))fail("stdin","INVALID_KEY_FORMAT");
@@ -70,7 +77,7 @@ function vercelApi(path:string,body?:unknown):Json{
 function environmentEntries(response:Json,target:string):Env[]{return Array.isArray(response.envs)?response.envs.map(value=>object(value) as Env).filter(value=>value.target?.includes(target)&&!value.gitBranch):[];}
 async function main(){
   const options=parseProvisionArguments(process.argv.slice(2));
-  if(options.help){console.log("higuchi-stripe-provision --key-stdin --account-id <approved acct> [--catalog-only | --webhook-url <Preview https URL>] [--allow-live]");return;}
+  if(options.help){console.log("higuchi-stripe-provision --key-stdin --account-id <approved acct> [--catalog-only | --webhook-url <Preview https URL>] [--currency USD|JPY] [--allow-live]\nJPY requires --catalog-only; it never changes webhooks, runtime keys, or deployment settings.");return;}
   const key=await readKey(),livemode=validateProvisionKey(key,options.accountId),target=livemode?"production":"preview";
   if(!options.catalogOnly&&!key.startsWith("rk_"))fail("stdin","FULL_KEY_MAY_ONLY_PROVISION_CATALOG_IN_MEMORY");
   // Bind the authenticated CLI to the exact application before any remote mutation.
@@ -83,8 +90,7 @@ async function main(){
     existing=environmentEntries(vercelApi(envPath),target);
     const previousAccount=existing.find(value=>value.key==="STRIPE_ACCOUNT_ID");if(previousAccount?.value&&previousAccount.value!==options.accountId)fail("vercel","EXISTING_ACCOUNT_MAPPING_MISMATCH");
   }
-  process.env.STRIPE_SECRET_KEY=key;process.env.STRIPE_ACCOUNT_ID=options.accountId;
-  process.env.STRIPE_METER_EVENT_NAME="higuchi_email_sent_v1";
+  const catalogEnvironment=provisionCatalogEnvironment({...process.env,STRIPE_SECRET_KEY:key,STRIPE_ACCOUNT_ID:options.accountId},options.currency);
   const [{provisionStripeBillingCatalog,stripeForm},{platformBillingCredentials}]=await Promise.all([import("../src/lib/higuchi/providerBilling"),import("../src/lib/higuchi/billingCredentials")]);
   const stripe=async(credentials:BillingCredentials,path:string,body?:Json,requestKey?:string):Promise<Json>=>{
     const response=await fetch(`https://api.stripe.com/v1${path}`,{method:body?"POST":"GET",headers:{Authorization:`Bearer ${credentials.stripeSecretKey}`,"Stripe-Version":VERSION,...(body?{"Content-Type":"application/x-www-form-urlencoded"}:{}),...(requestKey?{"Idempotency-Key":`higuchi-provision-${digest(requestKey)}`}:{})},body:body?stripeForm(body):undefined,cache:"no-store",signal:AbortSignal.timeout(25000)});
@@ -92,10 +98,10 @@ async function main(){
     if(!response.ok){const error=object(result.error),parameter=typeof error.param==="string"&&/^[a-zA-Z0-9_[\].]{1,100}$/.test(error.param)?error.param:undefined;fail("stripe",`HTTP_${response.status}${typeof error.code==="string"&&/^[a-z0-9_]{1,80}$/.test(error.code)?`_${error.code}`:""}`,parameter);}
     return result;
   };
-  const credentials=platformBillingCredentials();
+  const credentials=platformBillingCredentials(catalogEnvironment,options.currency);
   const account=await stripe(credentials,"/account");if(account.id!==options.accountId)fail("stripe","ACCOUNT_IDENTITY_MISMATCH");
-  const catalog=await provisionStripeBillingCatalog({allowLive:options.allowLive},{request:stripe});
-  if(options.catalogOnly){console.log(JSON.stringify({status:"catalog_configured",accountId:options.accountId,livemode,target,productId:catalog.productId,meterId:catalog.meterId,priceId:catalog.priceId,eventName:catalog.eventName,webhook:"not_created",environmentRegistration:"not_performed"}));return;}
+  const catalog=await provisionStripeBillingCatalog({allowLive:options.allowLive},{request:stripe,platform:()=>credentials});
+  if(options.catalogOnly){console.log(JSON.stringify({status:"catalog_configured",accountId:options.accountId,livemode,target,currency:options.currency,productId:catalog.productId,meterId:catalog.meterId,priceId:catalog.priceId,eventName:catalog.eventName,webhook:"not_created",environmentRegistration:"not_performed"}));return;}
   const endpoints:Json[]=[];let cursor="";
   for(let page=0;page<100;page++){const result=await stripe(credentials,`/webhook_endpoints?limit=100${cursor?`&starting_after=${encodeURIComponent(cursor)}`:""}`),batch=Array.isArray(result.data)?result.data.map(object):[];endpoints.push(...batch);if(!result.has_more)break;const last=batch.at(-1);if(!last||typeof last.id!=="string")fail("stripe","INVALID_WEBHOOK_PAGINATION");cursor=last.id;if(page===99)fail("stripe","WEBHOOK_LIST_TOO_LARGE");}
   const matched=endpoints.filter(endpoint=>{const m=object(endpoint.metadata);return m.higuchi_app==="higuchi-form"&&m.higuchi_purpose==="billing_global_webhook"&&m.higuchi_environment===target;});

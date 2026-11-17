@@ -43,6 +43,6 @@ export function recordAcceptedReceipt(state:WorkspaceState,messageId:string,rece
   confirmEmail(state,out,receipt.providerMessageId,receipt.acceptedAt);
   const thread=state.conversations.find(t=>t.leadId===out.leadId&&t.campaignId===out.campaignId);if(thread&&receipt.providerThreadId)thread.providerThreadId=receipt.providerThreadId;
   if(receipt.upstreamCampaignId)requireCampaign(state,out.campaignId).upstreamCampaignId=receipt.upstreamCampaignId;
-  if(out.kind!=="reply"&&!state.internal.billingJobs.some(j=>j.id===`usage:${out.id}`))state.internal.billingJobs.push({id:`usage:${out.id}`,kind:"usage",status:"pending",projectId:out.projectId,campaignId:out.campaignId,messageId:out.id,messageKind:out.kind,at:receipt.acceptedAt});
+  if(out.kind!=="reply"&&!state.internal.billingJobs.some(j=>j.id===`usage:${out.id}`))state.internal.billingJobs.push({id:`usage:${out.id}`,kind:"usage",status:"pending",currency:state.billing.currency,priceVersion:state.billing.priceVersion,projectId:out.projectId,campaignId:out.campaignId,messageId:out.id,messageKind:out.kind,at:receipt.acceptedAt});
   if(wasUncertain)recordActivity(state,"送信元の受付記録と照合し、送信結果・利用記録を復元しました。再送は行っていません。","success",out.projectId);
 }

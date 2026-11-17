@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { ArrowRight, Check, LoaderCircle, X } from "lucide-react";
 import { useEffect, useId, useRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { formatMoney, type MoneyCurrency } from "@/lib/higuchi/money";
 
-export const usd = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format((cents || 0) / 100);
+export const usd = (amountMinor: number, currency:MoneyCurrency="USD") => formatMoney(amountMinor,currency);
+export const money = formatMoney;
 export const count = (value: number) => new Intl.NumberFormat("ja-JP").format(value);
 export const dateTime = (value: string) => new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 
