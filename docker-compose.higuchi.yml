@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: higuchi
+      POSTGRES_USER: higuchi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - higuchi-db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U higuchi -d higuchi]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:3000:3000
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      HIGUCHI_MODE: live
+      DATABASE_URL: postgresql://higuchi:${POSTGRES_PASSWORD}@db:5432/higuchi
+      DATABASE_SSL: disable
+      BETTER_AUTH_URL: ${APP_URL:-http://localhost:3000}
+      NEXT_PUBLIC_APP_URL: ${APP_URL:-http://localhost:3000}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET}
+      INTEGRATION_CREDENTIALS_KEY: ${INTEGRATION_CREDENTIALS_KEY:?Set INTEGRATION_CREDENTIALS_KEY}
+      UNSUBSCRIBE_SECRET: ${UNSUBSCRIBE_SECRET:?Set UNSUBSCRIBE_SECRET}
+      AUTH_SIGNUP: open
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      AUTH_EMAIL_FROM: ${AUTH_EMAIL_FROM:-}
+      LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
+      NEXT_TELEMETRY_DISABLED: 1
+volumes:
+  higuchi-db:

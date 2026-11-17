@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["sin1"],
+  "functions": {
+    "src/app/api/higuchi/cron/route.ts": { "maxDuration": 120 }
+  },
+  "crons": [
+    { "path": "/api/higuchi/cron", "schedule": "* * * * *" }
+  ]
+}
